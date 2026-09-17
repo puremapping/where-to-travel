@@ -1,0 +1,52 @@
+# .pms.yml — 项目元信息
+name: where_to_travel
+version: 0.1.0
+status: doing
+tags: [education/course, travel, llm, recommendation, fastapi, beijing-opendata, amap]
+created: 2026-09-17
+last_used: 2026-09-18
+sp_project: null
+temporary_owner: null
+archive_path: null
+context:
+  goal: "课程作业：以 AI 对话为核心入口的旅游决策平台。先挖 Travel for What（动机），再推荐去哪，并给出可解释推荐与一日行程预演。北京真实数据，其他省份占位（MVP 暂不做）。"
+  next: "MVP 已端到端跑通（对话→动机→行程→时间线+地图）。待办：补 README、整理 docs、可选扩展（多日行程/占位数据/B端后台）"
+  decided: |
+    - 四人小组作业，无明确分工，当前由小霁推进 MVP
+    - 技术栈：FastAPI + SQLite + Jinja2 + Leaflet（不做前后端分离，无构建链）
+      · 评估过 Chainlit：对话壳免费但地图需自写组件、拖入 50+ opentelemetry 依赖，弃用
+      · 手写前端（templates/index.html + static/style.css + static/app.js）
+    - 大模型：GLM-4 Flash（实测可用且最省 12 tokens；glm-4.7 贵 16 倍；5.x 需充值）
+    - Embedding：阿里云百炼 text-embedding-v3（1024 维）
+      ⚠️ 必须用 Workspace 专属端点，公共端点 dashscope.aliyuncs.com 不被接受
+    - 数据源（已实测）：
+      1. 北京市公共数据开放平台 — 12 数据集 119,518 行已下载入库
+         · 212 景区 / 216 交通 / 217 人流（重点景区饱和指数去重后）
+         · key 是滚动时间戳，会失效；日常运行不需要（数据已落盘）
+      2. 高德 Web 服务 API — 地理编码 + 路径规划，212 个景区坐标已补齐（日配额 5000）
+      3. VisitBeijing MCP — ❌ 域名 NXDOMAIN，项目已死，改用平台「重点景区饱和指数」替代
+      4. 和风天气 — 未接入（公共域名 2026 年起停服，需专属 Host + JWT）
+    - 推荐引擎：动机→偏好映射（7 类动机），评分 = 等级×0.10 + 画像×0.15 + 动机偏好 - 拥挤惩罚
+      · 场所气质匹配：恢复/逃离需排除严肃场所（纪念馆/烈士等）、偏好自然景观
+    - 行程编排：自研（参考 ITINERA 思路）——距离聚类 + TSP(最近邻+2-opt) + 区收敛 + 时间预算剪枝
+      · 不依赖外部 LLM 排序，纯 numpy 实现
+    - 动机挖掘：LLM 输出 JSON，代码层做规范化兜底（hours 统一为 1-12 整数）
+      已处理：'1 day'→8小时、'一天'→8、'半天'→4、'一下午'→4
+    - 数据仓库形态：SQLite（data/wtt.db），表 attractions/transport/crowd_index/sessions
+    - 凭证管理：全部走 .env（已 gitignore），仓库只提供 .env.example
+  avoid: |
+    - 不批量预热 API 配额（高德 POI 搜索仅 100/日，坐标按需补；地理编码一次补齐即可）
+    - 不把密钥写进代码/文档（已全项目扫描确认干净）
+    - 不在 shell 里传中文 JSON（编码会坏），用 Python httpx
+    - 不用 hermes venv 装项目依赖（已建独立 .venv，用 uv 管理）
+  deps:
+    - Python 3.13（uv 建的独立 .venv）
+    - GLM API（智谱，glm-4-flash）
+    - 阿里云百炼（embedding）
+    - 高德地图 Web 服务（地理编码/路径规划）
+    - 北京市公共数据开放平台（数据已本地化）
+  reference:
+    - docs/reference/PRD.md — 产品需求文档 V1.2
+    - docs/reference/analysis.md — 竞品与学术支撑
+    - docs/research/ — 五份调研报告（数据源实测/竞品核实/可复用资产/arXiv/ITINERA 验证）
+    - sandbox/ITINERA/ — ITINERA 源码（EMNLP 2024，参考其行程编排思路）
