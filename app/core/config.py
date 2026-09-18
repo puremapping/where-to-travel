@@ -43,3 +43,15 @@ EMBEDDING_DIM = 1024
 
 # ---- 高德（按需查询，不做批量预热） ----
 AMAP_KEY = os.environ.get("AMAP_KEY", "")
+
+# ---- 认证 ----
+# 用于签名 cookie。首次运行若 .env 里没有，自动生成一个并提示。
+SECRET_KEY = os.environ.get("SECRET_KEY", "")
+if not SECRET_KEY:
+    import secrets as _secrets
+    SECRET_KEY = _secrets.token_hex(32)
+    # 提示写入 .env（不自动写，避免动用户文件）
+    import sys as _sys
+    print("[config] 警告：未设置 SECRET_KEY，本次使用临时值。"
+          "重启后 cookie 会失效。建议在 .env 加："
+          f"SECRET_KEY={SECRET_KEY}", file=_sys.stderr)

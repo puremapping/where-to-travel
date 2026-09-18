@@ -62,6 +62,7 @@ class Conversation:
     ready: bool = False                               # 信息是否足够生成行程
     created_at: str = ""
     tool_calls: list = field(default_factory=list)    # 本轮 LLM 请求调用的工具
+    itinerary: dict = field(default_factory=dict)     # 当前行程（匿名会话需要）
 
     def to_dict(self):
         return {
@@ -536,7 +537,8 @@ def _sanitize_tool_calls(tool_calls: list, user_text: str,
 
 def chat(session_id: Optional[str], user_text: str,
          llm: Optional[LLM] = None,
-         current_itinerary: dict = None) -> Conversation:
+         current_itinerary: dict = None,
+         user_id: str = None) -> Conversation:
     """处理一轮对话：用户说话 → AI 回复 + 更新画像 + 可能的工具调用
 
     关键设计：
@@ -547,14 +549,19 @@ def chat(session_id: Optional[str], user_text: str,
         时它知道指哪。
       - 回复调用带 tools，模型可请求 `generate_itinerary` /
         `propose_modify_itinerary`；真正的执行由上层做。
+      - **user_id**：为空 = 匿名（会话只存内存，刷新即丢）
     """
     llm = llm or LLM()
 
     # 1. 取或建会话
-    conv = load_session(session_id) if session_id else Conversation(
-        session_id=uuid.uuid4().hex[:12],
-        created_at=datetime.now().isoformat(),
-    )
+    conv = load_session(session_id, user_id) if session_id else None
+    if conv is None:
+        conv = Conversation(
+            session_id=uuid.uuid4().hex[:12],
+            created_at=datetime.now().isoformat(),
+        )
+    if not conv.created_at:
+        conv.created_at = datetime.now().isoformat()
 
     # 2. 追加用户消息
     conv.messages.append({"role": "user", "content": user_text})
@@ -649,7 +656,7 @@ def chat(session_id: Optional[str], user_text: str,
 
     conv.messages.append({"role": "assistant", "content": reply})
     conv.tool_calls = tool_calls          # 供上层执行
-    save_session(conv)
+    save_session(conv, user_id)
     return conv
 
 
@@ -668,15 +675,25 @@ def _is_ready(profile: dict) -> bool:
 
 # ── 会话持久化 ──
 
-def save_session(conv: Conversation):
+def save_session(conv: Conversation, user_id: str = None):
+    """保存会话
+
+    ⚠️ 核心规则：**匿名会话不落库**（阿哲定）。
+    user_id 为空时只更新内存里的匿名会话，不写数据库。
+    """
+    if not user_id:
+        _anon_put(conv)
+        return
     with connect() as conn:
         conn.execute(
-            """INSERT INTO sessions (id, created_at, profile, motivations, itinerary)
-               VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO sessions
+                 (id, user_id, created_at, turn_count, profile, motivations, itinerary)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
-                 profile = excluded.profile,
-                 motivations = excluded.motivations""",
-            (conv.session_id, conv.created_at,
+                 profile     = excluded.profile,
+                 motivations = excluded.motivations,
+                 turn_count  = excluded.turn_count""",
+            (conv.session_id, user_id, conv.created_at, conv.turn,
              json.dumps({
                  "profile": conv.profile,
                  "messages": conv.messages,
@@ -684,15 +701,22 @@ def save_session(conv: Conversation):
                  "ready": conv.ready,
              }, ensure_ascii=False),
              json.dumps(conv.profile, ensure_ascii=False),
-             ""))
-    # itinerary 列在 DB 里是 TEXT，这里沿用；空串表示未生成
+             "{}"))
 
 
-def load_session(session_id: str) -> Optional[Conversation]:
+def load_session(session_id: str, user_id: str = None) -> Optional[Conversation]:
+    """载入会话
+
+    user_id 为空 → 从匿名内存取；否则从 DB 取（且必须是该用户的）
+    """
+    if not user_id:
+        return _anon_get(session_id)
+
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, created_at, profile FROM sessions WHERE id=?",
-            (session_id,)).fetchone()
+            "SELECT id, created_at, profile FROM sessions "
+            "WHERE id=? AND user_id=?",
+            (session_id, user_id)).fetchone()
     if not row:
         return None
     payload = json.loads(row["profile"] or "{}")
@@ -704,6 +728,42 @@ def load_session(session_id: str) -> Optional[Conversation]:
         turn=payload.get("turn", 0),
         ready=payload.get("ready", False),
     )
+
+
+# ── 匿名会话：进程内存储，带 TTL ──
+# 设计：匿名不落库，刷新即丢；服务端只是暂存，避免一轮请求之间状态丢失
+import time as _time
+import threading as _threading
+
+_ANON_SESSIONS: dict = {}
+_ANON_LOCK = _threading.Lock()
+ANON_TTL = 3600          # 1 小时没访问就清
+
+
+def _anon_put(conv: "Conversation"):
+    with _ANON_LOCK:
+        _ANON_SESSIONS[conv.session_id] = (conv, _time.time())
+
+
+def _anon_get(session_id: str) -> Optional["Conversation"]:
+    with _ANON_LOCK:
+        item = _ANON_SESSIONS.get(session_id)
+        if not item:
+            return None
+        conv, _ = item
+        _ANON_SESSIONS[session_id] = (conv, _time.time())
+        return conv
+
+
+def _anon_cleanup():
+    """清理过期匿名会话（由后台线程定期调用）"""
+    now = _time.time()
+    with _ANON_LOCK:
+        dead = [k for k, (_, ts) in _ANON_SESSIONS.items()
+                if now - ts > ANON_TTL]
+        for k in dead:
+            del _ANON_SESSIONS[k]
+    return len(dead)
 
 
 def profile_summary(profile: dict) -> str:

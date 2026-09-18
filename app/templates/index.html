@@ -15,6 +15,8 @@
   </div>
   <div class="header-right">
     <span id="stats" class="stats"></span>
+    <span id="user-box" class="user-box"></span>
+    <button id="btn-history" class="ghost small hidden">我的行程</button>
     <button id="btn-restart" class="ghost small hidden">重新开始</button>
   </div>
 </header>
@@ -72,6 +74,34 @@
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="/static/app.js?v=3"></script>
+
+<!-- 登录 / 注册弹窗 -->
+<div id="auth-modal" class="modal hidden">
+  <div class="modal-card">
+    <button class="modal-close" id="auth-close">×</button>
+    <h3 id="auth-title">登录</h3>
+    <p class="modal-hint" id="auth-hint">登录后行程会保存到你的账号。</p>
+    <input id="auth-email" type="email" placeholder="邮箱" autocomplete="email">
+    <input id="auth-password" type="password" placeholder="密码（至少 6 位）"
+           autocomplete="current-password">
+    <input id="auth-nickname" type="text" placeholder="昵称（可选）" class="hidden">
+    <div id="auth-error" class="auth-error"></div>
+    <button id="auth-submit" class="primary full">登录</button>
+    <div class="modal-foot">
+      <a href="#" id="auth-toggle">还没有账号？注册</a>
+    </div>
+  </div>
+</div>
+
+<!-- 历史会话抽屉 -->
+<div id="history-drawer" class="drawer hidden">
+  <div class="drawer-head">
+    <strong>我的行程</strong>
+    <button class="modal-close" id="history-close">×</button>
+  </div>
+  <div id="history-list" class="history-list"></div>
+</div>
+
+<script src="/static/app.js?v=4"></script>
 </body>
 </html>

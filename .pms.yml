@@ -1,8 +1,8 @@
 # .pms.yml — 项目元信息
 name: where_to_travel
-version: 0.3.0
+version: 0.4.0
 status: doing
-tags: [education/course, travel, llm, recommendation, fastapi, beijing-opendata, amap, function-calling]
+tags: [education/course, travel, llm, recommendation, fastapi, beijing-opendata, amap, function-calling, auth, analytics]
 created: 2026-09-17
 last_used: 2026-09-18
 sp_project: null
@@ -11,20 +11,28 @@ archive_path: null
 context:
   goal: "课程作业 → 目标是能落地。以 AI 对话为核心入口的旅游决策平台，先挖 Travel for What（动机），再推荐去哪，给出可解释推荐与一日行程预演。北京真实数据。"
   next: |
-    按 DESIGN.md §7 剩余问题推进，优先级：
-    1. #6 直线距离 → 接高德路径规划 API（有配额，能让时间线更准）
-    2. 会话持久化 → 刷新页面丢失对话（前端存 localStorage 或后端 cookie）
-    3. #3 画像缺自然语言描述 → summary 字段已加，但前端未展示
-    4. 数据覆盖：只有北京 212 个景区（可落地的主要瓶颈）
+    按 DESIGN-user-system.md §6 未做项推进，优先级：
+    1. 直线距离 → 接高德路径规划 API（有配额，能让时间线更准）
+    2. 数据覆盖：只有北京 212 个景区（可落地的主要瓶颈）
+    3. 密码重置（需邮件服务）
+    4. session_end 事件无触发点（等明确「结束」信号）
   decided: |
     - 【目标】阿哲定为「想尽可能落地试试」，是他第一个与商业化有关的项目
     - 【架构】FastAPI + SQLite + Jinja2 + Leaflet，不做前后端分离（无构建链）
     - 【v0.2】多轮开放对话（v0.1 单轮表单太简陋）
-    - 【v0.3】对话-行程闭环（本次）：
+    - 【v0.3】对话-行程闭环：
       · AI 通过 function calling 主动生成行程（用户说「生成行程」即触发）
       · AI 能「看见」右侧行程（每轮传行程摘要，能回答「这个人多吗」）
       · 修改需确认：AI 调 propose_modify_itinerary → 前端出确认卡片 → 用户点确认才落实
       · 支持 5 种修改：replace/remove/add/reorder/regenerate
+    - 【v0.4】用户系统与行为分析（本次）：
+      · 邮箱+密码登录（pbkdf2_hmac 20 万次，不引 bcrypt）；cookie 用 HMAC 签名
+      · ⚠️ **不能强制注册**：匿名可完整使用，只是不落库；生成行程后提示「登录可保存」
+      · ⚠️ **匿名会话不落库**（阿哲定）：只在进程内存 + TTL 1h，刷新即丢
+      · ⚠️ **不存对话原文**（阿哲定）：message_sent 只记 text_len
+      · 会话打 user_id 标签；**所有查询强制 AND user_id=?**（越权实测被拦）
+      · 11 种行为事件 append-only，只记登录用户
+      · /admin 看板 + ADMIN_TOKEN 门禁（未设置则接口禁用，不裸奔）
     - 【关键设计】抽取与回复拆两次独立 LLM 调用
       实测：带 assistant 消息的抽取调用会让模型「续写对话」而非抽取
     - 【关键设计】代码层证据校验（小模型会瞎补 companions）
@@ -37,15 +45,22 @@ context:
     - Embedding：阿里云百炼 text-embedding-v3（1024 维，Workspace 专属端点）
     - 数据源：北京公共数据平台 12 数据集 119,518 行 + 高德地理编码（212 条坐标）
     - 行程编排：自研（聚类+TSP+区收敛+时间预算剪枝），不依赖 LLM 排序
-    - 【验证】动机抽取 10 场景 9 正确 0 误判；tool_calls 5 场景全通过
+    - 【验证】动机抽取 10 场景 9 正确 0 误判；tool_calls 5 场景全通过；
+      用户系统 6 项端到端验证全通过（匿名不落库/隔离/越权/401/403）
   avoid: |
     - 不批量预热 API 配额（高德 POI 搜索仅 100/日）
-    - 不把密钥写进代码/文档（已全项目扫描）
+    - 不把密钥写进代码/文档（已全项目扫描，含推 public 前克隆远程复查）
     - 不在 shell 里传中文 JSON（编码会坏），用 Python httpx
     - 不用 `except: pass` 静默吞异常（会掩盖真问题，已踩过）
     - ⚠️ 改代码后必须：杀旧进程 → 启动 → **验证新接口存在**（曾因端口被孤儿进程占用，
       新服务静默失败，用户看到的还是旧代码）
     - ⚠️ 改前端后要给静态资源加版本号（曾因浏览器缓存旧 JS，功能「没生效」）
+    - ⚠️ 数据库迁移：`CREATE TABLE IF NOT EXISTS` 对已存在表跳过 → 新列不生效，
+      必须 ALTER TABLE；且**依赖新列的索引要放在迁移之后**（否则 no such column）
+    - ⚠️ `fetch` 必须带 `credentials: 'include'`，否则 cookie 不发送，认不出登录用户
+    - ⚠️ Starlette 新版 `TemplateResponse(request, name, ctx)`，旧签名会报
+      `unhashable type: 'dict'`
+    - ⚠️ 别另起新 JS 文件替代旧的（会砍掉已有功能）——要**增量合并**
   deps:
     - Python 3.13（uv 建的独立 .venv）
     - GLM API（智谱 glm-4-flash）
@@ -54,6 +69,7 @@ context:
     - 北京市公共数据开放平台（数据已本地化到 data/wtt.db）
   reference:
     - DESIGN.md — 设计文档（架构、流程、已知问题）
+    - docs/DESIGN-user-system.md — 用户系统与行为分析设计（v0.4）
     - docs/DESIGN-conversation-itinerary-loop.md — 对话-行程闭环设计（v0.3）
     - docs/reference/PRD.md — 产品需求文档 V1.2
     - docs/reference/analysis.md — 竞品与学术支撑

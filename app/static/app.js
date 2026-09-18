@@ -1,4 +1,4 @@
-/* Where to Travel — 前端（多轮对话版） */
+/* Where to Travel — 前端（多轮对话版 + 用户系统） */
 
 const $ = (s) => document.querySelector(s);
 const show = (el) => el.classList.remove('hidden');
@@ -10,6 +10,7 @@ let map = null;
 let mapLayer = null;
 let lastItinerary = null;
 let busy = false;
+let currentUser = null;      // 登录用户，null = 匿名
 
 // ────────── 基础 ──────────
 
@@ -19,6 +20,26 @@ async function loadStats() {
     $('#stats').textContent =
       `${d.attractions} 个景区 · ${d.crowd_index} 条人流`;
   } catch (e) { /* 忽略 */ }
+}
+
+// ⚠️ 所有请求都要带 cookie（credentials），否则后端认不出登录用户
+async function postJSON(url, body) {
+  const r = await fetch(url, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `请求失败 (${r.status})`);
+  return d;
+}
+
+async function getJSON(url) {
+  const r = await fetch(url, { credentials: 'include' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `请求失败 (${r.status})`);
+  return d;
 }
 
 function loading(on, text) {
@@ -131,29 +152,31 @@ async function send(text) {
   loading(true, '正在理解你的想法……');
 
   try {
-    const r = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: t, session_id: sessionId }),
-    });
-    const d = await r.json();
-    if (d.error) throw new Error(d.error);
+    const d = await postJSON('/api/chat', { text: t, session_id: sessionId });
 
     sessionId = d.session_id;
     removeTyping();
     addMessage('assistant', d.reply);
     renderProfile(d.profile || {});
 
+    // 匿名用户第一次生成行程后，提示登录
+    if (d.logged_in === false && d.itinerary) {
+      showLoginHint();
+    }
+
     readyForItinerary = !!d.ready;
     if (readyForItinerary && !lastItinerary) show($('#cta-block'));
     show($('#btn-restart'));
 
     // AI 直接生成了行程
-    if (d.itinerary) {
-      lastItinerary = d.itinerary;
-      renderItinerary(d.itinerary);
-      show($('#result-block'));
-      $('#result-block').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (d.itinerary || d.action === 'generate') {
+      const it = d.itinerary;
+      if (it) {
+        lastItinerary = it;
+        renderItinerary(it);
+        show($('#result-block'));
+        $('#result-block').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
     }
 
     // AI 提议修改 → 显示确认卡片
@@ -172,6 +195,25 @@ async function send(text) {
     busy = false;
     $('#input').focus();
   }
+}
+
+// 匿名用户看到行程后 → 提示登录可保存（不强制）
+function showLoginHint() {
+  if (currentUser || document.getElementById('login-hint')) return;
+  const box = document.createElement('div');
+  box.className = 'msg assistant';
+  box.id = 'login-hint';
+  box.innerHTML = `
+    <div class="bubble hint-bubble">
+      这一版行程只在当前页面，<b>刷新就没了</b>。
+      <a href="#" class="hint-login">登录</a>后可以保存到账号，以后能翻回来。
+    </div>`;
+  $('#messages').appendChild(box);
+  box.querySelector('.hint-login').onclick = (e) => {
+    e.preventDefault();
+    openAuth('login');
+  };
+  scrollToBottom();
 }
 
 // ────────── 修改确认卡片 ──────────
@@ -215,17 +257,11 @@ async function applyModification(p) {
   busy = true;
   loading(true, '正在调整行程……');
   try {
-    const r = await fetch('/api/itinerary/modify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_id: sessionId,
-        action: p.action,
-        target: p.target,
-      }),
+    const d = await postJSON('/api/itinerary/modify', {
+      session_id: sessionId,
+      action: p.action,
+      target: p.target,
     });
-    const d = await r.json();
-    if (d.error) throw new Error(d.error);
 
     lastItinerary = d;
     renderItinerary(d);
@@ -247,19 +283,14 @@ async function makeItinerary() {
   loading(true, '正在编排行程……');
 
   try {
-    const r = await fetch('/api/itinerary', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: sessionId }),
-    });
-    const d = await r.json();
-    if (d.error) throw new Error(d.error);
+    const d = await postJSON('/api/itinerary', { session_id: sessionId });
 
     lastItinerary = d;
     renderItinerary(d);
     show($('#result-block'));
-    // 滚到结果
     $('#result-block').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    if (!currentUser) showLoginHint();
   } catch (e) {
     alert('生成失败：' + e.message);
   } finally {
@@ -360,6 +391,160 @@ function greet() {
     '你好，我是 Where to Travel 的旅行助手。\n\n先别急着说去哪——我更想知道，你这次是**为什么**想出去走走？');
 }
 
+// ────────── 用户系统 ──────────
+
+let authMode = 'login';
+
+async function refreshUser() {
+  try {
+    const d = await getJSON('/api/auth/me');
+    currentUser = d.user;
+  } catch (e) {
+    currentUser = null;
+  }
+  renderUserBox();
+}
+
+function renderUserBox() {
+  const box = $('#user-box');
+  if (!box) return;
+  if (currentUser) {
+    box.innerHTML = `<span class="user-name">${esc(currentUser.nickname || currentUser.email)}</span>
+      <a href="#" id="btn-logout">退出</a>`;
+    $('#btn-logout').onclick = async (e) => {
+      e.preventDefault();
+      await postJSON('/api/auth/logout', {});
+      currentUser = null;
+      renderUserBox();
+      addMessage('assistant', '已退出登录。当前对话仍在页面上，但刷新后就没了。');
+    };
+    show($('#btn-history'));
+  } else {
+    box.innerHTML = `<a href="#" id="btn-login">登录</a>`;
+    $('#btn-login').onclick = (e) => { e.preventDefault(); openAuth('login'); };
+    hide($('#btn-history'));
+  }
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}
+
+function openAuth(mode) {
+  authMode = mode || 'login';
+  const isLogin = authMode === 'login';
+  $('#auth-title').textContent = isLogin ? '登录' : '注册';
+  $('#auth-submit').textContent = isLogin ? '登录' : '注册';
+  $('#auth-hint').textContent = isLogin
+    ? '登录后行程会保存到你的账号。'
+    : '注册后行程会保存到你的账号。';
+  isLogin ? hide($('#auth-nickname')) : show($('#auth-nickname'));
+  $('#auth-toggle').textContent = isLogin ? '还没有账号？注册' : '已有账号？登录';
+  $('#auth-error').textContent = '';
+  show($('#auth-modal'));
+  $('#auth-email').focus();
+}
+
+function closeAuth() { hide($('#auth-modal')); }
+
+async function submitAuth() {
+  const email = $('#auth-email').value.trim();
+  const password = $('#auth-password').value;
+  const nickname = $('#auth-nickname').value.trim();
+  const err = $('#auth-error');
+  if (!email || !password) { err.textContent = '邮箱和密码都要填'; return; }
+
+  const btn = $('#auth-submit');
+  btn.disabled = true;
+  err.textContent = '';
+  try {
+    const d = await postJSON(
+      authMode === 'login' ? '/api/auth/login' : '/api/auth/register',
+      { email, password, nickname });
+    currentUser = d.user;
+    closeAuth();
+    renderUserBox();
+    $('#auth-password').value = '';
+    // 登录后，之前匿名聊的会话归到账号下（服务端已按 cookie 绑定）
+    addMessage('assistant', authMode === 'login'
+      ? '登录成功。之后的对话会保存，可以在「我的行程」里翻到。'
+      : '注册成功。之后的对话会保存，可以在「我的行程」里翻到。');
+  } catch (e) {
+    err.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function openHistory() {
+  show($('#history-drawer'));
+  const list = $('#history-list');
+  list.innerHTML = '<div class="empty">载入中……</div>';
+  try {
+    const d = await getJSON('/api/history');
+    if (!d.items.length) {
+      list.innerHTML = '<div class="empty">还没有保存的行程。</div>';
+      return;
+    }
+    list.innerHTML = d.items.map((it) => `
+      <div class="history-item" data-sid="${it.id}">
+        <div class="hi-main">
+          <div class="hi-motiv">${esc(it.motivation || '未定动机')}</div>
+          <div class="hi-meta">${fmtTime(it.created_at)} · ${it.turn_count} 轮${it.has_itinerary ? ' · 有行程' : ''}</div>
+        </div>
+        <button class="hi-del" data-del="${it.id}" title="删除">×</button>
+      </div>`).join('');
+
+    list.querySelectorAll('.history-item').forEach((el) => {
+      el.onclick = (e) => {
+        if (e.target.dataset.del) return;
+        loadHistory(el.dataset.sid);
+      };
+    });
+    list.querySelectorAll('.hi-del').forEach((el) => {
+      el.onclick = async (e) => {
+        e.stopPropagation();
+        if (!confirm('删除这次记录？')) return;
+        try {
+          await fetch(`/api/history/${el.dataset.del}`, {
+            method: 'DELETE', credentials: 'include',
+          });
+          el.closest('.history-item').remove();
+        } catch (err) { alert(err.message); }
+      };
+    });
+  } catch (e) {
+    list.innerHTML = `<div class="empty">载入失败：${esc(e.message)}</div>`;
+  }
+}
+
+async function loadHistory(sid) {
+  try {
+    const d = await getJSON(`/api/history/${sid}`);
+    hide($('#history-drawer'));
+    $('#messages').innerHTML = '';
+    sessionId = d.session_id;
+    (d.messages || []).forEach((m) => {
+      addMessage(m.role === 'user' ? 'user' : 'assistant', m.content);
+    });
+    if (d.itinerary) {
+      lastItinerary = d.itinerary;
+      renderItinerary(d.itinerary);
+      show($('#result-block'));
+    }
+    addMessage('assistant', `（已载入 ${fmtTime(d.created_at)} 的对话，继续聊会接着这个会话。）`);
+  } catch (e) { alert(e.message); }
+}
+
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return iso.slice(0, 16);
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 // ────────── 事件绑定 ──────────
 
 $('#btn-send').onclick = () => send();
@@ -383,8 +568,28 @@ document.querySelectorAll('button.st').forEach(btn => {
   btn.onclick = () => send(btn.textContent);
 });
 
+// 认证 UI
+$('#auth-close').onclick = closeAuth;
+$('#auth-toggle').onclick = (e) => {
+  e.preventDefault();
+  openAuth(authMode === 'login' ? 'register' : 'login');
+};
+$('#auth-submit').onclick = submitAuth;
+$('#auth-modal').onclick = (e) => { if (e.target.id === 'auth-modal') closeAuth(); };
+['auth-email', 'auth-password', 'auth-nickname'].forEach((id) => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submitAuth();
+  });
+});
+
+// 历史抽屉
+$('#btn-history').onclick = openHistory;
+$('#history-close').onclick = () => hide($('#history-drawer'));
+
 // ────────── 启动 ──────────
 
 loadStats();
 greet();
+refreshUser();
 $('#input').focus();
