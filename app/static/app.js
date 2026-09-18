@@ -1,23 +1,24 @@
-/* Where to Travel — 前端逻辑 */
+/* Where to Travel — 前端（多轮对话版） */
 
 const $ = (s) => document.querySelector(s);
 const show = (el) => el.classList.remove('hidden');
 const hide = (el) => el.classList.add('hidden');
 
-let currentMotivation = null;
+let sessionId = null;
+let readyForItinerary = false;
 let map = null;
 let mapLayer = null;
 let lastItinerary = null;
+let busy = false;
 
-// ---------- 初始化 ----------
+// ────────── 基础 ──────────
 
 async function loadStats() {
   try {
-    const r = await fetch('/api/stats');
-    const d = await r.json();
+    const d = await (await fetch('/api/stats')).json();
     $('#stats').textContent =
-      `${d.attractions} 个景区 · ${d.crowd_index} 条人流 · ${d.transport} 条交通`;
-  } catch (e) { /* 静默 */ }
+      `${d.attractions} 个景区 · ${d.crowd_index} 条人流`;
+  } catch (e) { /* 忽略 */ }
 }
 
 function loading(on, text) {
@@ -26,91 +27,201 @@ function loading(on, text) {
   on ? show(el) : hide(el);
 }
 
-// ---------- 步骤一：动机分析 ----------
+function scrollToBottom() {
+  const box = $('#messages');
+  box.scrollTop = box.scrollHeight;
+}
 
-$('#btn-analyze').onclick = async () => {
-  const text = $('#user-input').value.trim();
-  if (!text) { alert('先说说你的想法吧'); return; }
+// ────────── 消息渲染 ──────────
 
-  loading(true, '正在理解你的旅行想法……');
+function addMessage(role, text) {
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  div.appendChild(bubble);
+  $('#messages').appendChild(div);
+  scrollToBottom();
+  return div;
+}
+
+function addTyping() {
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+  div.id = 'typing';
+  div.innerHTML = '<div class="bubble"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>';
+  $('#messages').appendChild(div);
+  scrollToBottom();
+  return div;
+}
+
+function removeTyping() {
+  const t = $('#typing');
+  if (t) t.remove();
+}
+
+// ────────── 画像面板 ──────────
+
+const FIELD_LABELS = {
+  primary: '动机',
+  primary_intensity: null,      // 跟 primary 合并显示
+  secondary: '次要',
+  hours: '时长',
+  companions: '同伴',
+  pace: '节奏',
+  interests: '兴趣',
+  avoid: '避开',
+  must_see: '必去',
+};
+
+function renderProfile(p) {
+  const box = $('#profile');
+  const keys = Object.keys(FIELD_LABELS).filter(k => p[k] !== undefined && p[k] !== null && p[k] !== '');
+  if (!keys.length) {
+    box.innerHTML = '<div class="empty">还在了解中……</div>';
+    return;
+  }
+
+  let html = '';
+  // 主动机单独突出
+  if (p.primary) {
+    const inten = p.primary_intensity || 3;
+    html += `
+      <div class="pf-primary">
+        <span class="pf-main">${p.primary}</span>
+        <span class="pf-inten">${inten}/5</span>
+      </div>
+      <div class="bar"><i style="width:${inten * 20}%"></i></div>`;
+  }
+
+  const rows = [];
+  if (p.secondary && p.secondary.length) rows.push(['次要', p.secondary.join('、')]);
+  if (p.hours) rows.push(['时长', `约 ${p.hours} 小时`]);
+  if (p.companions) rows.push(['同伴', p.companions]);
+  if (p.pace) rows.push(['节奏', p.pace]);
+  if (p.interests && p.interests.length) rows.push(['兴趣', p.interests.join('、')]);
+  if (p.avoid && p.avoid.length) rows.push(['避开', p.avoid.join('、')]);
+  if (p.must_see && p.must_see.length) rows.push(['必去', p.must_see.join('、')]);
+
+  if (rows.length) {
+    html += '<dl class="pf-list">';
+    for (const [k, v] of rows) {
+      html += `<dt>${k}</dt><dd>${v}</dd>`;
+    }
+    html += '</dl>';
+  }
+  box.innerHTML = html;
+}
+
+// ────────── 发送 ──────────
+
+async function send(text) {
+  if (busy) return;
+  const t = (text || $('#input').value).trim();
+  if (!t) return;
+
+  busy = true;
+  $('#input').value = '';
+  $('#input').style.height = 'auto';
+  hide($('#starters'));
+
+  addMessage('user', t);
+  addTyping();
+  loading(true, '正在理解你的想法……');
+
   try {
     const r = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text: t, session_id: sessionId }),
     });
     const d = await r.json();
     if (d.error) throw new Error(d.error);
 
-    currentMotivation = d.motivation;
-    renderMotivation(d);
-    hide($('#step-input'));
-    show($('#step-motive'));
+    sessionId = d.session_id;
+    removeTyping();
+    addMessage('assistant', d.reply);
+    renderProfile(d.profile || {});
+
+    readyForItinerary = !!d.ready;
+    if (readyForItinerary && !lastItinerary) show($('#cta-block'));
+    show($('#btn-restart'));
+
+    // AI 直接生成了行程
+    if (d.itinerary) {
+      lastItinerary = d.itinerary;
+      renderItinerary(d.itinerary);
+      show($('#result-block'));
+      $('#result-block').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    // AI 提议修改 → 显示确认卡片
+    if (d.proposal) {
+      showProposal(d.proposal);
+    }
+
+    if (d.action_error) {
+      addMessage('assistant', `（${d.action_error}）`);
+    }
   } catch (e) {
-    alert('分析失败：' + e.message);
+    removeTyping();
+    addMessage('assistant', `抱歉，出了点问题：${e.message}`);
   } finally {
     loading(false);
-  }
-};
-
-function renderMotivation(d) {
-  const m = d.motivation;
-  const intensity = m.primary_intensity || 3;
-  const c = m.constraints || {};
-
-  let html = `
-    <div class="motive-primary">
-      ${m.primary}
-      <span class="intensity">强度 ${intensity}/5</span>
-    </div>
-    <div class="bar"><i style="width:${intensity * 20}%"></i></div>
-  `;
-
-  if (m.secondary && m.secondary.length) {
-    html += `<div>次要动机：`;
-    html += m.secondary.map(s => `<span class="chip on">${s}</span>`).join(' ');
-    html += `</div>`;
-  }
-
-  const parts = [];
-  if (c.hours) parts.push(`时长约 ${c.hours} 小时`);
-  if (c.companions) parts.push(`同伴：${c.companions}`);
-  if (c.note) parts.push(c.note);
-  if (parts.length) {
-    html += `<div class="constraints">识别到的约束：${parts.join(' · ')}</div>`;
-  }
-
-  html += `<div class="constraints" style="margin-top:14px">如果理解有偏差，点「重新描述」换个说法。</div>`;
-
-  $('#motive-result').innerHTML = html;
-
-  // 如果识别出时长，同步到下拉框
-  if (c.hours) {
-    const opt = [...$('#hours').options].find(o => parseInt(o.value) === c.hours);
-    if (opt) $('#hours').value = c.hours;
+    busy = false;
+    $('#input').focus();
   }
 }
 
-$('#btn-back').onclick = () => {
-  hide($('#step-motive'));
-  hide($('#step-result'));
-  show($('#step-input'));
+// ────────── 修改确认卡片 ──────────
+
+const ACTION_LABELS = {
+  replace: '换掉', remove: '去掉', add: '增加一站',
+  reorder: '调整顺序', regenerate: '重新生成整条',
 };
 
-// ---------- 步骤二：生成行程 ----------
+function showProposal(p) {
+  const label = ACTION_LABELS[p.action] || '调整';
+  const box = document.createElement('div');
+  box.className = 'msg assistant';
+  box.innerHTML = `
+    <div class="bubble proposal">
+      <div class="proposal-title">待确认的修改</div>
+      <div class="proposal-body">
+        ${label}${p.target ? `「${p.target}」` : ''}
+        ${p.reason ? `<div class="proposal-reason">${p.reason}</div>` : ''}
+      </div>
+      <div class="proposal-actions">
+        <button class="primary small" data-act="yes">确认修改</button>
+        <button class="ghost small" data-act="no">取消</button>
+      </div>
+    </div>`;
+  $('#messages').appendChild(box);
+  scrollToBottom();
 
-$('#btn-itinerary').onclick = async () => {
-  if (!currentMotivation) return;
+  box.querySelector('[data-act="yes"]').onclick = () => {
+    box.querySelector('.proposal-actions').innerHTML = '<span class="ok-text">已确认</span>';
+    applyModification(p);
+  };
+  box.querySelector('[data-act="no"]').onclick = () => {
+    box.querySelector('.proposal-actions').innerHTML = '<span class="dim-text">已取消</span>';
+    addMessage('assistant', '好的，那就不改。还有什么想调整的吗？');
+  };
+}
 
-  loading(true, '正在编排行程……');
+async function applyModification(p) {
+  if (busy) return;
+  busy = true;
+  loading(true, '正在调整行程……');
   try {
-    const r = await fetch('/api/itinerary', {
+    const r = await fetch('/api/itinerary/modify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        motivation: currentMotivation.primary,
-        intensity: currentMotivation.primary_intensity || 3,
-        hours: $('#hours').value || null,
+        session_id: sessionId,
+        action: p.action,
+        target: p.target,
       }),
     });
     const d = await r.json();
@@ -118,39 +229,65 @@ $('#btn-itinerary').onclick = async () => {
 
     lastItinerary = d;
     renderItinerary(d);
-    hide($('#step-motive'));
-    show($('#step-result'));
-    loadReco();
+    show($('#result-block'));
+    addMessage('assistant', '已经改好了，看看现在还合适吗？');
+  } catch (e) {
+    addMessage('assistant', `改不动：${e.message}`);
+  } finally {
+    loading(false);
+    busy = false;
+  }
+}
+
+// ────────── 生成行程 ──────────
+
+async function makeItinerary() {
+  if (busy) return;
+  busy = true;
+  loading(true, '正在编排行程……');
+
+  try {
+    const r = await fetch('/api/itinerary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+
+    lastItinerary = d;
+    renderItinerary(d);
+    show($('#result-block'));
+    // 滚到结果
+    $('#result-block').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
     alert('生成失败：' + e.message);
   } finally {
     loading(false);
+    busy = false;
   }
-};
+}
 
 function renderItinerary(d) {
-  // 叙述
   $('#narrative').textContent = d.narrative || '（未生成叙述）';
 
-  // 评估
   const a = d.assessment || {};
   $('#assessment').innerHTML = `
     <div>整体强度：<span class="lvl ${a.intensity || ''}">${a.intensity || '—'}</span></div>
-    ${a.strength ? `<div style="margin-top:6px">${a.strength}</div>` : ''}
-    ${a.suggestion ? `<div style="margin-top:6px;color:var(--accent)">建议：${a.suggestion}</div>` : ''}
-    ${d.risks && d.risks.length ? `<div class="risks">${d.risks.map(r => `<div class="risk">${r}</div>`).join('')}</div>` : ''}
+    ${a.strength ? `<div class="a-line">${a.strength}</div>` : ''}
+    ${a.suggestion ? `<div class="a-line accent">建议：${a.suggestion}</div>` : ''}
+    ${(d.risks || []).map(r => `<div class="risk">${r}</div>`).join('')}
   `;
 
-  // 时间线
   const stops = d.stops || [];
   $('#timeline').innerHTML = stops.map(s => {
-    let crowdBadge = '';
+    let crowd = '';
     if (s.crowd !== null && s.crowd !== undefined) {
-      if (s.crowd >= 60) crowdBadge = `<span class="badge crowd-high">人流 ${s.crowd.toFixed(0)}</span>`;
-      else if (s.crowd <= 10) crowdBadge = `<span class="badge crowd-low">人流 ${s.crowd.toFixed(0)}</span>`;
-      else crowdBadge = `<span class="badge">人流 ${s.crowd.toFixed(0)}</span>`;
+      const cls = s.crowd >= 60 ? 'crowd-high' : (s.crowd <= 10 ? 'crowd-low' : '');
+      crowd = `<span class="badge ${cls}">人流 ${s.crowd.toFixed(0)}</span>`;
     }
-    const metro = s.metro ? `<span class="badge">地铁 ${String(s.metro).slice(0, 12)}</span>` : '';
+    const metro = s.metro
+      ? `<span class="badge">${String(s.metro).slice(0, 14)}</span>` : '';
     const reasons = (s.reasons && s.reasons.length)
       ? `<div class="stop-reasons">${s.reasons.join('；')}</div>` : '';
     return `
@@ -159,88 +296,95 @@ function renderItinerary(d) {
           <span class="stop-time">${s.arrive}</span>
           <span class="stop-name">${s.name}</span>
           <span class="badge">${s.level || '—'}</span>
-          ${crowdBadge}${metro}
+          ${crowd}${metro}
         </div>
         <div class="stop-meta">${s.district || ''} · 停留约 ${s.duration_min} 分钟</div>
         ${reasons}
       </div>`;
-  }).join('') + `
-    <div class="stop-meta" style="margin-top:8px">
-      全程约 ${d.total_distance_km} 公里（直线距离估算）
-    </div>`;
+  }).join('') + `<div class="stop-meta total">
+      全程约 ${d.total_distance_km} 公里（直线估算）</div>`;
 
   renderMap(stops);
 }
 
 function renderMap(stops) {
-  if (!stops.length) return;
+  if (!stops || !stops.length) return;
+  const valid = stops.filter(s => s.lat != null && s.lon != null);
+  if (!valid.length) {
+    $('#map').innerHTML = '<div class="empty">无坐标数据</div>';
+    return;
+  }
   if (!map) {
-    map = L.map('map').setView([stops[0].lat, stops[0].lon], 11);
+    map = L.map('map').setView([valid[0].lat, valid[0].lon], 11);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 18,
-      attribution: '&copy; OpenStreetMap',
+      maxZoom: 18, attribution: '&copy; OpenStreetMap',
     }).addTo(map);
   }
-  if (mapLayer) { map.removeLayer(mapLayer); }
+  if (mapLayer) map.removeLayer(mapLayer);
   mapLayer = L.layerGroup().addTo(map);
 
   const coords = [];
-  stops.forEach((s, i) => {
-    if (s.lat == null || s.lon == null) return;
+  valid.forEach((s, i) => {
     coords.push([s.lat, s.lon]);
     L.marker([s.lat, s.lon])
-      .bindPopup(`<b>${i + 1}. ${s.name}</b><br>${s.arrive}<br>${s.district || ''}`)
+      .bindPopup(`<b>${i + 1}. ${s.name}</b><br>${s.arrive} · ${s.district || ''}`)
       .addTo(mapLayer);
   });
   if (coords.length > 1) {
-    L.polyline(coords, { color: '#4c8dff', weight: 2.5, opacity: 0.8 }).addTo(mapLayer);
-    map.fitBounds(coords, { padding: [40, 40] });
+    L.polyline(coords, { color: '#4c8dff', weight: 2.5, opacity: 0.85 }).addTo(mapLayer);
+    map.fitBounds(coords, { padding: [30, 30] });
   }
-  setTimeout(() => map.invalidateSize(), 100);
+  setTimeout(() => map.invalidateSize(), 120);
 }
 
-// ---------- 其他推荐 ----------
+// ────────── 重置 ──────────
 
-async function loadReco() {
-  if (!currentMotivation) return;
-  try {
-    const r = await fetch('/api/recommend', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        motivation: currentMotivation.primary,
-        intensity: currentMotivation.primary_intensity || 3,
-        top_k: 6,
-      }),
-    });
-    const d = await r.json();
-    const used = new Set((lastItinerary?.stops || []).map(s => s.name));
-    const rest = (d.items || []).filter(i => !used.has(i.name)).slice(0, 5);
-
-    $('#reco-list').innerHTML = rest.length ? rest.map(i => `
-      <div class="reco">
-        <div class="reco-top">
-          <span class="reco-name">${i.name}</span>
-          <span class="reco-score">匹配 ${(i.score * 100).toFixed(0)}%</span>
-        </div>
-        <div class="stop-meta">${i.level || ''} · ${i.district || ''}</div>
-        ${i.reasons && i.reasons.length ? `<div class="reco-reasons">${i.reasons.join('；')}</div>` : ''}
-      </div>`).join('') : '<div class="hint">没有更多推荐了</div>';
-  } catch (e) { /* 静默 */ }
+function restart() {
+  sessionId = null;
+  readyForItinerary = false;
+  lastItinerary = null;
+  $('#messages').innerHTML = '';
+  $('#profile').innerHTML = '<div class="empty">还没开始聊</div>';
+  hide($('#cta-block'));
+  hide($('#result-block'));
+  hide($('#btn-restart'));
+  show($('#starters'));
+  $('#result-block').classList.add('hidden');
+  if (mapLayer && map) { map.removeLayer(mapLayer); mapLayer = null; }
+  greet();
+  $('#input').focus();
 }
 
-// ---------- 示例按钮 ----------
+function greet() {
+  addMessage('assistant',
+    '你好，我是 Where to Travel 的旅行助手。\n\n先别急着说去哪——我更想知道，你这次是**为什么**想出去走走？');
+}
 
-document.querySelectorAll('button.ex').forEach(btn => {
-  btn.onclick = () => {
-    $('#user-input').value = btn.textContent;
-    $('#user-input').focus();
-  };
+// ────────── 事件绑定 ──────────
+
+$('#btn-send').onclick = () => send();
+$('#btn-itinerary').onclick = makeItinerary;
+$('#btn-restart').onclick = restart;
+
+$('#input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
 });
 
-// Ctrl/Cmd + Enter 快捷提交
-$('#user-input').addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') $('#btn-analyze').click();
+// 自动调整高度
+$('#input').addEventListener('input', function () {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 140) + 'px';
 });
+
+document.querySelectorAll('button.st').forEach(btn => {
+  btn.onclick = () => send(btn.textContent);
+});
+
+// ────────── 启动 ──────────
 
 loadStats();
+greet();
+$('#input').focus();

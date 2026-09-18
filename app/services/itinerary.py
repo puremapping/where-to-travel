@@ -172,16 +172,19 @@ def tsp_order(idx, pts):
 
 # ---------- 主流程 ----------
 
-def build_itinerary(candidates, motivation, hours=None):
+def build_itinerary(candidates, motivation, hours=None, exclude=None):
     """candidates: [(name, level, district, address, lon, lat, crowd, metro, reasons), ...]
 
+    exclude: 要排除的景点名列表（用于「换一批」）
     返回 Itinerary
     """
     hours = hours or DEFAULT_HOURS
     n_poi, thresh = TIME2PLAN.get(hours, TIME2PLAN[DEFAULT_HOURS])
 
-    # 过滤无坐标的
-    cand = [c for c in candidates if c[4] is not None and c[5] is not None]
+    # 过滤：无坐标 / 被排除
+    excl = set(exclude or [])
+    cand = [c for c in candidates
+            if c[4] is not None and c[5] is not None and c[0] not in excl]
     cand = cand[:max(n_poi * 2, n_poi)]     # 多取一些做聚类
 
     it = Itinerary(motivation=motivation, hours=hours)
@@ -271,6 +274,83 @@ def build_itinerary(candidates, motivation, hours=None):
     it = _assess_risks(it)
     it.alternatives = _suggest_alternatives(cand, picked)
     return it
+
+
+def apply_modification(itinerary_dict, action, target=None, candidates=None,
+                       motivation=None, hours=None):
+    """对已有行程执行修改，返回新行程 dict
+
+    action:
+      replace    —— 换掉 target 那一站
+      remove     —— 删掉 target
+      add        —— 加一站（从未入选的候选里挑）
+      reorder    —— 重跑 TSP 排序
+      regenerate —— 整条重新生成（排除现有站点）
+
+    实现思路：**统一走「重算」** —— 修改站点集合后重新编排时间线，
+    避免手工调整导致时间错乱。
+    """
+    cur = itinerary_dict or {}
+    stops = list(cur.get("stops") or [])
+    hours = hours or cur.get("hours") or DEFAULT_HOURS
+    motivation = motivation or cur.get("motivation") or "探索/新奇"
+
+    if not stops:
+        return None
+
+    # 把当前站点转成 cand 元组形式，便于复用构建逻辑
+    def to_tuple(s):
+        return (s["name"], s.get("level", ""), s.get("district", ""),
+                s.get("address", ""), s.get("lon"), s.get("lat"),
+                s.get("crowd"), s.get("metro", ""), s.get("reasons") or [])
+
+    base = [to_tuple(s) for s in stops]
+
+    if action == "regenerate":
+        # 换一批：排除现有全部站点
+        excl = [s["name"] for s in stops]
+        pool = [c for c in (candidates or []) if c[0] not in excl]
+        return build_itinerary(pool or candidates, motivation, hours).to_dict()
+
+    if action == "reorder":
+        return build_itinerary(base, motivation, hours).to_dict()
+
+    if not target:
+        return None
+
+    if action == "remove":
+        pool = [c for c in base if c[0] != target]
+        if len(pool) < 2:
+            return None
+        return build_itinerary(pool, motivation, hours).to_dict()
+
+    if action == "replace":
+        # 从候选里找一个「同区优先、未在行程中」的替换
+        used = {s["name"] for s in stops}
+        cur_stop = next((s for s in stops if s["name"] == target), None)
+        cand_pool = [c for c in (candidates or [])
+                     if c[0] not in used and c[4] is not None]
+        if not cand_pool:
+            return None
+        if cur_stop:
+            # 同区域的优先
+            same = [c for c in cand_pool if c[2] == cur_stop.get("district")]
+            pick = (same or cand_pool)[0]
+        else:
+            pick = cand_pool[0]
+        pool = [c if c[0] != target else pick for c in base]
+        return build_itinerary(pool, motivation, hours).to_dict()
+
+    if action == "add":
+        used = {s["name"] for s in stops}
+        cand_pool = [c for c in (candidates or [])
+                     if c[0] not in used and c[4] is not None]
+        if not cand_pool:
+            return None
+        pool = base + [cand_pool[0]]
+        return build_itinerary(pool, motivation, hours).to_dict()
+
+    return None
 
 
 def _tighten_by_district(picked, cand, n_poi):

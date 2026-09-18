@@ -13,78 +13,65 @@
     <span class="logo">Where to Travel</span>
     <span class="tagline">不只告诉你「去哪」，先帮你搞清楚「为什么去」</span>
   </div>
-  <div id="stats" class="stats"></div>
+  <div class="header-right">
+    <span id="stats" class="stats"></span>
+    <button id="btn-restart" class="ghost small hidden">重新开始</button>
+  </div>
 </header>
 
-<main>
-  <!-- 第一步：动机输入 -->
-  <section id="step-input" class="card">
-    <h2>说说你这次想怎么过</h2>
-    <p class="hint">比如：「最近工作太累了，想找个安静的地方待一天」「想带爸妈出去走走」</p>
-    <textarea id="user-input" rows="3"
-      placeholder="用你自己的话描述就行，不用很正式……"></textarea>
-    <div class="examples">
-      <span class="ex-label">试试：</span>
-      <button class="ex">最近工作太累了，想找个安静的地方待一天</button>
-      <button class="ex">想拍照，要特别出片的机位</button>
-      <button class="ex">带爸妈出去走走，他们走不快</button>
-      <button class="ex">想把故宫长城这些打卡一遍</button>
-    </div>
-    <button id="btn-analyze" class="primary">分析我的旅行想法</button>
-  </section>
+<div class="layout">
 
-  <!-- 第二步：动机确认 -->
-  <section id="step-motive" class="card hidden">
-    <h2>我理解你这次想要的是</h2>
-    <div id="motive-result" class="motive-box"></div>
-    <div class="row">
-      <label>时长：
-        <select id="hours">
-          <option value="">不确定</option>
-          <option value="2">约 2 小时</option>
-          <option value="4">约 4 小时（半天）</option>
-          <option value="6">约 6 小时</option>
-          <option value="8" selected>约 8 小时（一天）</option>
-        </select>
-      </label>
-      <button id="btn-itinerary" class="primary">生成一日行程</button>
-      <button id="btn-back" class="ghost">重新描述</button>
-    </div>
-  </section>
+  <!-- 左栏：对话 -->
+  <main class="chat-pane">
+    <div id="messages" class="messages"></div>
 
-  <!-- 第三步：行程结果 -->
-  <section id="step-result" class="hidden">
-    <div class="card">
-      <h2>为你生成的行程</h2>
+    <div class="composer">
+      <textarea id="input" rows="1"
+        placeholder="说说你这次想怎么过……（Enter 发送，Shift+Enter 换行）"></textarea>
+      <button id="btn-send" class="primary">发送</button>
+    </div>
+
+    <div id="starters" class="starters">
+      <span class="st-label">试试：</span>
+      <button class="st">想去北京玩一天</button>
+      <button class="st">最近工作太累了，想找个人少的地方待着</button>
+      <button class="st">带爸妈出去走走，他们走不快</button>
+      <button class="st">想拍点好看的照片</button>
+    </div>
+  </main>
+
+  <!-- 右栏：画像 + 行程 -->
+  <aside class="side-pane">
+    <div class="side-block">
+      <h3>我了解到的</h3>
+      <div id="profile" class="profile">
+        <div class="empty">还没开始聊</div>
+      </div>
+    </div>
+
+    <div id="cta-block" class="side-block hidden">
+      <button id="btn-itinerary" class="primary full">看行程</button>
+      <p class="hint-small">随时可以继续聊，聊得越细行程越准</p>
+    </div>
+
+    <div id="result-block" class="side-block hidden">
+      <h3>行程</h3>
       <div id="narrative" class="narrative"></div>
       <div id="assessment" class="assessment"></div>
-    </div>
-
-    <div class="card">
-      <h2>行程时间线</h2>
       <div id="timeline" class="timeline"></div>
-    </div>
-
-    <div class="card">
-      <h2>地图</h2>
       <div id="map" class="map"></div>
-      <p class="hint">坐标来自高德地理编码，底图使用 OpenStreetMap</p>
     </div>
+  </aside>
 
-    <div class="card" id="reco-card">
-      <h2>其他推荐</h2>
-      <div id="reco-list" class="reco-list"></div>
-    </div>
-  </section>
+</div>
 
-  <div id="loading" class="loading hidden">
-    <div class="spinner"></div>
-    <span id="loading-text">正在思考……</span>
-  </div>
-</main>
+<div id="loading" class="loading hidden">
+  <div class="spinner"></div>
+  <span id="loading-text">正在思考……</span>
+</div>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=3"></script>
 </body>
 </html>

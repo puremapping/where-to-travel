@@ -1,52 +1,61 @@
 # .pms.yml — 项目元信息
 name: where_to_travel
-version: 0.1.0
+version: 0.3.0
 status: doing
-tags: [education/course, travel, llm, recommendation, fastapi, beijing-opendata, amap]
+tags: [education/course, travel, llm, recommendation, fastapi, beijing-opendata, amap, function-calling]
 created: 2026-09-17
 last_used: 2026-09-18
 sp_project: null
 temporary_owner: null
 archive_path: null
 context:
-  goal: "课程作业：以 AI 对话为核心入口的旅游决策平台。先挖 Travel for What（动机），再推荐去哪，并给出可解释推荐与一日行程预演。北京真实数据，其他省份占位（MVP 暂不做）。"
-  next: "MVP 已端到端跑通（对话→动机→行程→时间线+地图）。待办：补 README、整理 docs、可选扩展（多日行程/占位数据/B端后台）"
+  goal: "课程作业 → 目标是能落地。以 AI 对话为核心入口的旅游决策平台，先挖 Travel for What（动机），再推荐去哪，给出可解释推荐与一日行程预演。北京真实数据。"
+  next: |
+    按 DESIGN.md §7 剩余问题推进，优先级：
+    1. #6 直线距离 → 接高德路径规划 API（有配额，能让时间线更准）
+    2. 会话持久化 → 刷新页面丢失对话（前端存 localStorage 或后端 cookie）
+    3. #3 画像缺自然语言描述 → summary 字段已加，但前端未展示
+    4. 数据覆盖：只有北京 212 个景区（可落地的主要瓶颈）
   decided: |
-    - 四人小组作业，无明确分工，当前由小霁推进 MVP
-    - 技术栈：FastAPI + SQLite + Jinja2 + Leaflet（不做前后端分离，无构建链）
-      · 评估过 Chainlit：对话壳免费但地图需自写组件、拖入 50+ opentelemetry 依赖，弃用
-      · 手写前端（templates/index.html + static/style.css + static/app.js）
-    - 大模型：GLM-4 Flash（实测可用且最省 12 tokens；glm-4.7 贵 16 倍；5.x 需充值）
-    - Embedding：阿里云百炼 text-embedding-v3（1024 维）
-      ⚠️ 必须用 Workspace 专属端点，公共端点 dashscope.aliyuncs.com 不被接受
-    - 数据源（已实测）：
-      1. 北京市公共数据开放平台 — 12 数据集 119,518 行已下载入库
-         · 212 景区 / 216 交通 / 217 人流（重点景区饱和指数去重后）
-         · key 是滚动时间戳，会失效；日常运行不需要（数据已落盘）
-      2. 高德 Web 服务 API — 地理编码 + 路径规划，212 个景区坐标已补齐（日配额 5000）
-      3. VisitBeijing MCP — ❌ 域名 NXDOMAIN，项目已死，改用平台「重点景区饱和指数」替代
-      4. 和风天气 — 未接入（公共域名 2026 年起停服，需专属 Host + JWT）
-    - 推荐引擎：动机→偏好映射（7 类动机），评分 = 等级×0.10 + 画像×0.15 + 动机偏好 - 拥挤惩罚
-      · 场所气质匹配：恢复/逃离需排除严肃场所（纪念馆/烈士等）、偏好自然景观
-    - 行程编排：自研（参考 ITINERA 思路）——距离聚类 + TSP(最近邻+2-opt) + 区收敛 + 时间预算剪枝
-      · 不依赖外部 LLM 排序，纯 numpy 实现
-    - 动机挖掘：LLM 输出 JSON，代码层做规范化兜底（hours 统一为 1-12 整数）
-      已处理：'1 day'→8小时、'一天'→8、'半天'→4、'一下午'→4
-    - 数据仓库形态：SQLite（data/wtt.db），表 attractions/transport/crowd_index/sessions
-    - 凭证管理：全部走 .env（已 gitignore），仓库只提供 .env.example
+    - 【目标】阿哲定为「想尽可能落地试试」，是他第一个与商业化有关的项目
+    - 【架构】FastAPI + SQLite + Jinja2 + Leaflet，不做前后端分离（无构建链）
+    - 【v0.2】多轮开放对话（v0.1 单轮表单太简陋）
+    - 【v0.3】对话-行程闭环（本次）：
+      · AI 通过 function calling 主动生成行程（用户说「生成行程」即触发）
+      · AI 能「看见」右侧行程（每轮传行程摘要，能回答「这个人多吗」）
+      · 修改需确认：AI 调 propose_modify_itinerary → 前端出确认卡片 → 用户点确认才落实
+      · 支持 5 种修改：replace/remove/add/reorder/regenerate
+    - 【关键设计】抽取与回复拆两次独立 LLM 调用
+      实测：带 assistant 消息的抽取调用会让模型「续写对话」而非抽取
+    - 【关键设计】代码层证据校验（小模型会瞎补 companions）
+    - 【关键设计】动机七分类配判据词表
+    - 【关键设计】⚠️ 服务端校验 tool_calls（白名单）—— prompt 里的「不要调用」不可靠
+      且**过滤要按意图分别设计**（一刀切会误杀该调的 propose）
+    - 【关键设计】⚠️ 数据边界必须服务端硬拦
+      模型会声称「我有上海的数据」并静默给出北京行程（实测），prompt 声明无效
+    - 大模型：GLM-4 Flash（可用且最省；glm-4.7 贵 16 倍；5.x 需充值）
+    - Embedding：阿里云百炼 text-embedding-v3（1024 维，Workspace 专属端点）
+    - 数据源：北京公共数据平台 12 数据集 119,518 行 + 高德地理编码（212 条坐标）
+    - 行程编排：自研（聚类+TSP+区收敛+时间预算剪枝），不依赖 LLM 排序
+    - 【验证】动机抽取 10 场景 9 正确 0 误判；tool_calls 5 场景全通过
   avoid: |
-    - 不批量预热 API 配额（高德 POI 搜索仅 100/日，坐标按需补；地理编码一次补齐即可）
-    - 不把密钥写进代码/文档（已全项目扫描确认干净）
+    - 不批量预热 API 配额（高德 POI 搜索仅 100/日）
+    - 不把密钥写进代码/文档（已全项目扫描）
     - 不在 shell 里传中文 JSON（编码会坏），用 Python httpx
-    - 不用 hermes venv 装项目依赖（已建独立 .venv，用 uv 管理）
+    - 不用 `except: pass` 静默吞异常（会掩盖真问题，已踩过）
+    - ⚠️ 改代码后必须：杀旧进程 → 启动 → **验证新接口存在**（曾因端口被孤儿进程占用，
+      新服务静默失败，用户看到的还是旧代码）
+    - ⚠️ 改前端后要给静态资源加版本号（曾因浏览器缓存旧 JS，功能「没生效」）
   deps:
     - Python 3.13（uv 建的独立 .venv）
-    - GLM API（智谱，glm-4-flash）
+    - GLM API（智谱 glm-4-flash）
     - 阿里云百炼（embedding）
     - 高德地图 Web 服务（地理编码/路径规划）
-    - 北京市公共数据开放平台（数据已本地化）
+    - 北京市公共数据开放平台（数据已本地化到 data/wtt.db）
   reference:
+    - DESIGN.md — 设计文档（架构、流程、已知问题）
+    - docs/DESIGN-conversation-itinerary-loop.md — 对话-行程闭环设计（v0.3）
     - docs/reference/PRD.md — 产品需求文档 V1.2
     - docs/reference/analysis.md — 竞品与学术支撑
-    - docs/research/ — 五份调研报告（数据源实测/竞品核实/可复用资产/arXiv/ITINERA 验证）
-    - sandbox/ITINERA/ — ITINERA 源码（EMNLP 2024，参考其行程编排思路）
+    - docs/research/ — 五份调研报告
+    - sandbox/ITINERA/ — ITINERA 源码（EMNLP 2024，参考其编排思路，未入库）
