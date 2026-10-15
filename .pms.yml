@@ -4,7 +4,7 @@ version: 0.4.0
 status: doing
 tags: [education/course, travel, llm, recommendation, fastapi, beijing-opendata, amap, function-calling, auth, analytics]
 created: 2026-09-17
-last_used: 2026-09-18
+last_used: 2026-10-15
 sp_project: null
 temporary_owner: null
 archive_path: null
@@ -75,3 +75,25 @@ context:
     - docs/reference/analysis.md — 竞品与学术支撑
     - docs/research/ — 五份调研报告
     - sandbox/ITINERA/ — ITINERA 源码（EMNLP 2024，参考其编排思路，未入库）
+deployment:
+  repos:
+    - role: canonical
+      host: local
+      path: D:/fs/workspace/projects/where_to_travel
+      note: 日常开发位置
+    - role: mirror
+      host: github
+      url: https://github.com/puremapping/where-to-travel
+      note: public 镜像，tag v0.1.0 / v0.3.0 / v0.4.0
+  services:
+    - host: local
+      name: where-to-travel
+      port: 8100
+      note: uvicorn，仅本机；对外需 --host 0.0.0.0
+  runtime:
+    - host: local
+      path: D:/fs/workspace/projects/where_to_travel/data/wtt.db
+      note: SQLite 运行数据（212 景区 + 用户/会话/事件），不进 git
+    - host: local
+      path: D:/fs/workspace/projects/where_to_travel/.env
+      note: 凭证（API key + SECRET_KEY + ADMIN_TOKEN），不进 git
