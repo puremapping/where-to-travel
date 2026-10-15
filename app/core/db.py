@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Where to Travel — 数据库层（SQLite）"""
+import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 from app.core.config import DB_PATH
@@ -77,7 +79,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id  TEXT,
-    user_id     TEXT,
+    user_id     TEXT NOT NULL,     -- ★ 匿名事件写不进来（隐私政策的结构约束）
     event_type  TEXT NOT NULL,
     payload     TEXT,              -- JSON
     created_at  TEXT NOT NULL
@@ -121,6 +123,49 @@ def _migrate(conn):
     ):
         if name not in s:
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {decl}")
+
+    _migrate_events_notnull(conn)
+
+
+def _migrate_events_notnull(conn):
+    """把 events.user_id 改成 NOT NULL（SQLite 不支持 ALTER COLUMN，要重建表）
+
+    动机：把「匿名不落库」这条隐私政策变成**结构约束**，而不是只靠代码判空。
+    ⚠️ 若表里已有 user_id 为空的行，无法加约束 —— 此时不清数据，只跳过并留痕。
+    """
+    info = list(conn.execute("PRAGMA table_info(events)"))
+    if not info:
+        return                      # 表不存在，init_db 的建表语句已带 NOT NULL
+    ucol = next((r for r in info if r["name"] == "user_id"), None)
+    if ucol is None or ucol["notnull"] == 1:
+        return                      # 已是 NOT NULL（或列不存在），无需迁移
+
+    bad = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE user_id IS NULL OR user_id = ''"
+    ).fetchone()[0]
+    if bad:
+        # 不擅自删数据（数据诚实高于好看）—— 记录问题，跳过迁移
+        conn.execute(
+            "INSERT INTO events (session_id,user_id,event_type,payload,created_at) "
+            "VALUES (NULL, '__migration__', 'migration_skipped', ?, ?)",
+            (json.dumps({"reason": "events.user_id 有 %d 行空值" % bad}),
+             datetime.now().isoformat()))
+        return
+
+    conn.executescript("""
+        CREATE TABLE events_new (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT,
+            user_id     TEXT NOT NULL,
+            event_type  TEXT NOT NULL,
+            payload     TEXT,
+            created_at  TEXT NOT NULL
+        );
+        INSERT INTO events_new (id,session_id,user_id,event_type,payload,created_at)
+            SELECT id,session_id,user_id,event_type,payload,created_at FROM events;
+        DROP TABLE events;
+        ALTER TABLE events_new RENAME TO events;
+    """)
 
 
 @contextmanager

@@ -7,6 +7,9 @@
 # ── 数据（可由脚本重新生成） ─────────────────────
 .research/
 data/*.db
+data/*.db.bak-*
+data/*.db-wal
+data/*.db-shm
 *.xlsx
 *.xls
 !docs/**/*.xlsx

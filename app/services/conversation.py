@@ -34,7 +34,7 @@ MOTIVATIONS = {
 
 # 画像字段说明（给 LLM 看，用于判断信息是否充分）
 PROFILE_FIELDS = {
-    "destination": "目的地城市（如「北京」「上海」）。用户提到去哪就填。",
+    "destination": "目的地城市（如「北京」「上海」）。用户提到去哪就填。**没说就省略这个字段**，不要填「未知」。",
     "origin": "出发地城市（可选）。用户提到从哪出发才填。",
     "primary": "主动机（七类之一）",
     "primary_intensity": "主动机强度 1-5",
@@ -141,6 +141,8 @@ EXTRACT_PROMPT = """你是信息抽取器。从旅行对话中抽取结构化信
 
 ## 其他字段
 - `destination`：目的地城市。用户提到「去北京」「上海玩」就填「北京」「上海」
+  ⚠️ **不知道就省略这个字段，绝对不要填「未知」「不确定」「待定」「无」这类占位词** ——
+  那会被下游当成「一个叫未知的城市」，输出荒谬回复
 - `origin`：出发地。用户说「从天津出发」才填，没说省略
 - `primary_intensity`：1-5 整数。明确强烈（"特别累""就想"）=4-5；随口提=2-3
 - `secondary`：次要动机列表（0-2 个，同样从七类里选）
@@ -388,10 +390,9 @@ def _fallback_reply(tool_calls: list, conv: "Conversation") -> str:
     """模型返回 tool_calls 但 content 为空时的兜底回复
 
     实测：模型决定调工具时常不写正文，直接给 tool_calls。
-    这时不能回「能再多说说吗」—— 那与正在做的事完全脱节。
     """
     if not tool_calls:
-        return "嗯，能再多说说吗？"
+        return _substantive_fallback(conv)
 
     tc = tool_calls[0]
     name = tc.get("name")
@@ -419,15 +420,73 @@ def _fallback_reply(tool_calls: list, conv: "Conversation") -> str:
     return "好的，我来处理。"
 
 
+def _substantive_fallback(conv: "Conversation") -> str:
+    """正文为空且无工具调用时的兜底 —— 给实质内容，不敷衍
+
+    优先级：有动机 → 顺着动机问最关键的一个缺口；
+            没动机 → 问动机（这是产品的核心入口）。
+    """
+    p = conv.profile or {}
+    mot = p.get("primary")
+    dest = _clean_field_value(p.get("destination"))
+    hours = p.get("hours")
+
+    if not mot:
+        return ("我先问最关键的一件事：**你这次出去是为了什么？**\n\n"
+                "比如想歇一歇、想陪家人、想找点新鲜感——说法随意，"
+                "我按这个来挑地方。")
+
+    if not hours:
+        return f"明白，这次是「{mot}」。\n\n那你大概能空出多久？半天还是一整天？"
+
+    if not dest:
+        return (f"好，这次是「{mot}」，大概 {hours} 小时。\n\n"
+                "想去哪个城市？我目前有**北京**的完整数据（212 个景区）。")
+
+    return "我先把条件理一理，你要补充什么随时说。"
+
+
+# 「等于没填」的占位词 —— 模型有时会把它们当字面值填进字段
+_PLACEHOLDER_VALUES = {
+    "未知", "不清楚", "不确定", "不知道", "待定", "未定", "未提及",
+    "未指定", "未提供", "未说明", "暂无", "无", "没有", "none", "null",
+    "n/a", "na", "-", "--", "?", "？", "不限", "都可以", "随便", "都行",
+    "任意", "其他", "其它",
+}
+
+
+def _clean_field_value(v):
+    """清洗字段值：占位词/纯符号 → 空串
+
+    ⚠️ 实测教训：模型会把「未知」这类占位词当字面值填进 destination，
+    下游 _is_beijing("未知") 返回 False → 误判为「非北京城市」，
+    输出「未知还查不了」这种荒谬回复。必须在入口就归一成空。
+    """
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if not s:
+        return ""
+    # 纯标点/空白
+    if all(c in "-—–_./\\|*#?？!！,，。.、;；:：" for c in s):
+        return ""
+    if s.lower() in _PLACEHOLDER_VALUES or s in _PLACEHOLDER_VALUES:
+        return ""
+    return s
+
+
 def _is_beijing(dest: str) -> bool:
     """判断目的地是否在北京范围内
 
     数据库只覆盖北京（212 个景区，16 个区）。
     用户说「北京」「朝阳区」「密云」都算北京。
+
+    ⚠️ 「未知」「不确定」这类占位词 = 用户没说过目的地 → 视为空（True）。
+       不能当成「一个叫未知的城市」。
     """
-    if not dest:
+    d = _clean_field_value(dest)
+    if not d:
         return True
-    d = str(dest).strip()
     if "北京" in d or d in ("京", "首都"):
         return True
     districts = (
@@ -474,9 +533,9 @@ def _is_generate_intent(user_text: str) -> bool:
     if not t:
         return False
     triggers = [
-        "生成", "排个", "排一下", "安排", "规划", "出个", "做个", "给个",
-        "看看行程", "看行程", "出方案", "方案", "路线", "怎么玩", "怎么安排",
-        "换一批", "换一个", "重新来", "再来一版", "其他的", "别的",
+        "生成", "排个", "排一下", "安排", "规划", "出个", "做个",
+        "看看行程", "看行程", "出方案", "怎么玩", "怎么安排",
+        "换一批", "重新来", "再来一版",
     ]
     return any(k in t for k in triggers)
 
@@ -608,7 +667,23 @@ def chat(session_id: Optional[str], user_text: str,
 
     # 服务端校验 tool_calls（防误触发）
     has_itin = bool(current_itinerary)
+    _raw_count = len(tool_calls)
     tool_calls = _sanitize_tool_calls(tool_calls, user_text, has_itin)
+
+    # ⚠️ 关键补救：模型本打算调工具（所以没写正文），但服务端把工具拦掉了
+    #    → 此刻 reply 和 tool_calls 双空，用户会收到空洞兜底。
+    #    正确做法：**重新让模型用文字回答**（去掉 tools 再问一次），
+    #    而不是套模板 —— 模板不看用户说了什么，必然答非所问。
+    if not reply and not tool_calls and _raw_count > 0:
+        try:
+            msg2 = llm.chat_raw(
+                _build_reply_messages(conv, itinerary=current_itinerary),
+                temperature=0.6,
+                tools=None,          # ← 不给工具，逼它说话
+            )
+            reply = _clean_reply((msg2.content or "").strip())
+        except Exception:
+            pass
 
     # 反向补齐：用户明确要求生成，但模型没调工具 → 强制补上
     # 实测教训：加了 destination 字段后，模型会优先追问「去哪个城市」
@@ -625,7 +700,8 @@ def chat(session_id: Optional[str], user_text: str,
     # ⚠️ 数据边界拦截：只有北京数据
     # 实测教训：模型会声称「我有上海的数据」并给出北京行程（静默错误）。
     # 光靠 prompt 告知无效，必须服务端硬拦。
-    dest = (conv.profile.get("destination") or "").strip()
+    # ⚠️ 且必须先清洗 —— 模型会把「未知」当目的地填进来，不能当「一个叫未知的城市」。
+    dest = _clean_field_value(conv.profile.get("destination"))
     if dest and not _is_beijing(dest):
         tool_calls = [t for t in tool_calls if t["name"] != "generate_itinerary"]
         if "北京" not in reply:
@@ -643,6 +719,15 @@ def chat(session_id: Optional[str], user_text: str,
     for k, v in (new_profile or {}).items():
         if k in _FIELD_EVIDENCE and not _has_evidence(k, user_text_all):
             continue          # 用户没说，拒绝这个字段
+        # 清洗：占位词（「未知」「不确定」「无」…）不该进画像
+        if isinstance(v, str):
+            v = _clean_field_value(v)
+            if not v:
+                continue
+        elif isinstance(v, list):
+            v = [x for x in (_clean_field_value(i) for i in v) if x]
+            if not v:
+                continue
         filtered[k] = v
     conv.profile = _merge_profile(conv.profile, filtered)
 
