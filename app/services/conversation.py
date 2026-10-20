@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Optional
 
 from app.core.db import connect
+from app.services import cities
 from app.services.llm import LLM
 from app.services.tools import get_tools
 
@@ -89,13 +90,13 @@ REPLY_PROMPT = """你是「Where to Travel」的旅行需求访谈助手。通�
 - 可以说的：人流指数、所在区、景区等级、行程距离——这些数据你有
 - **宁可说不知道，不要编一个看起来对的时间**
 
-## ⚠️ 你只有北京的数据（重要！）
-- **你的景点数据库里只有北京**（212 个景区）。
+## ⚠️ 你只有这些城市的数据（重要！）
+- **你的景点数据库覆盖：{supported}。**
 - 用户提到其他城市（上海/成都/西安…）时，**必须老实说**：
-  「我目前只有北京的数据，别的城市还查不了。」
+  「我目前只有{supported}的数据，别的城市还查不了。」
 - **绝不能说「我有上海的」「上海有很多好玩的」这类话 —— 那是撒谎。**
-- 你可以说：北京的数据能给你具体安排；其他城市当前帮不上。
-- 如果用户想去别的城市，可以问要不要先看北京，或说明现在是 MVP 阶段。
+- 你可以说：这几个城市的数据能给你具体安排；其他城市当前帮不上。
+- 如果用户想去别的城市，可以问要不要先看支持的城市，或说明现在是 MVP 阶段。
 
 ## ⚠️ 用户明确要求时，先执行，不要追问
 - 用户说「生成行程」「帮我排一下」时 → **直接调用工具**，不要再问问题
@@ -342,7 +343,10 @@ def _build_reply_messages(conv: "Conversation", itinerary: dict = None):
     itinerary：右侧当前展示的行程。传进来让 AI「看得见」用户在看什么，
     这样用户说「最后那个太远了」时，AI 知道「最后那个」指哪。
     """
-    msgs = [{"role": "system", "content": REPLY_PROMPT}]
+    # ⚠️ 城市列表从数据库算，不写死在 prompt 里 —— 加城市只导入数据，不改代码
+    system = REPLY_PROMPT.replace(
+        "{supported}", cities.supported_description())
+    msgs = [{"role": "system", "content": system}]
 
     ctx = []
     if conv.profile:
@@ -441,7 +445,7 @@ def _substantive_fallback(conv: "Conversation") -> str:
 
     if not dest:
         return (f"好，这次是「{mot}」，大概 {hours} 小时。\n\n"
-                "想去哪个城市？我目前有**北京**的完整数据（212 个景区）。")
+                f"想去哪个城市？我目前有**{cities.supported_description()}**的完整数据。")
 
     return "我先把条件理一理，你要补充什么随时说。"
 
@@ -475,11 +479,11 @@ def _clean_field_value(v):
     return s
 
 
-def _is_beijing(dest: str) -> bool:
-    """判断目的地是否在北京范围内
+def _is_supported_destination(dest: str) -> bool:
+    """判断目的地是否在数据覆盖范围内
 
-    数据库只覆盖北京（212 个景区，16 个区）。
-    用户说「北京」「朝阳区」「密云」都算北京。
+    ⚠️ 不再硬编码「北京」—— 从数据库的城市注册表判断（app/services/cities.py）。
+       加第二座城市只需导入数据，不用改这里。
 
     ⚠️ 「未知」「不确定」这类占位词 = 用户没说过目的地 → 视为空（True）。
        不能当成「一个叫未知的城市」。
@@ -487,14 +491,7 @@ def _is_beijing(dest: str) -> bool:
     d = _clean_field_value(dest)
     if not d:
         return True
-    if "北京" in d or d in ("京", "首都"):
-        return True
-    districts = (
-        "东城", "西城", "朝阳", "海淀", "丰台", "石景山", "门头沟",
-        "房山", "通州", "顺义", "昌平", "大兴", "怀柔", "平谷",
-        "密云", "延庆",
-    )
-    return any(x in d for x in districts)
+    return cities.is_supported(d)
 
 
 def _clean_reply(reply: str) -> str:
@@ -685,29 +682,40 @@ def chat(session_id: Optional[str], user_text: str,
         except Exception:
             pass
 
+    # ⚠️ 数据边界拦截：只有数据覆盖的城市
+    # 实测教训：模型会声称「我有上海的数据」并给出北京行程（静默错误）。
+    # 光靠 prompt 告知无效，必须服务端硬拦。
+    # ⚠️ 且必须先清洗 —— 模型会把「未知」当目的地填进来，不能当「一个叫未知的城市」。
+    # ⚠️ 关键时序：合并画像在下面第 5 步，此处 conv.profile 还是**上一轮**的值。
+    #    必须优先用本轮新抽到的 destination，否则「这轮才说上海」会被漏拦。
+    dest = _clean_field_value(
+        new_profile.get("destination")
+        if isinstance(new_profile, dict) and new_profile.get("destination")
+        else conv.profile.get("destination"))
+    blocked = bool(dest) and not _is_supported_destination(dest)
+
     # 反向补齐：用户明确要求生成，但模型没调工具 → 强制补上
     # 实测教训：加了 destination 字段后，模型会优先追问「去哪个城市」
     # 而忽略用户明确的「生成行程」指令。光靠 prompt 纠正不可靠。
-    if (not tool_calls and not has_itin and _is_generate_intent(user_text)):
+    # ⚠️ 若目的地不支持，不能补 —— 否则强行生成北京行程给上海需求（静默错误）
+    if (not tool_calls and not has_itin and not blocked
+            and _is_generate_intent(user_text)):
         tool_calls = [{
             "name": "generate_itinerary",
             "args": {"hours": conv.profile.get("hours")} if conv.profile.get("hours") else {},
             "forced": True,
         }]
         if reply and "生成行程" not in reply and "排" not in reply:
-            reply = "好，我先按北京给你排一条，要换城市随时说。"
+            reply = f"好，我先按{cities.city_names()[0]}给你排一条，要换城市随时说。"
 
-    # ⚠️ 数据边界拦截：只有北京数据
-    # 实测教训：模型会声称「我有上海的数据」并给出北京行程（静默错误）。
-    # 光靠 prompt 告知无效，必须服务端硬拦。
-    # ⚠️ 且必须先清洗 —— 模型会把「未知」当目的地填进来，不能当「一个叫未知的城市」。
-    dest = _clean_field_value(conv.profile.get("destination"))
-    if dest and not _is_beijing(dest):
+    # ⚠️ 数据边界拦截：只有数据覆盖的城市
+    if blocked:
         tool_calls = [t for t in tool_calls if t["name"] != "generate_itinerary"]
-        if "北京" not in reply:
-            reply = (f"我目前只有**北京**的景点数据（212 个景区），"
+        supported = cities.supported_description()
+        if not any(c in reply for c in cities.city_names()):
+            reply = (f"我目前只有**{supported}**的景点数据，"
                      f"{dest}还查不了。\n\n"
-                     f"要不要先看看北京的安排？或者等我们接入{dest}的数据。")
+                     f"要不要先看看这几个城市的安排？或者等我们接入{dest}的数据。")
 
     if not reply:
         # 模型返回 tool_calls 时 content 常为空 —— 不能直接兜底成「能再多说说吗」

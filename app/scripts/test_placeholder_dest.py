@@ -6,10 +6,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from app.services.conversation import _is_beijing
+from app.services.conversation import _is_supported_destination
 
 print("=" * 76)
-print("_is_beijing 对占位词的处理（当前行为）")
+print("_is_supported_destination 对占位词的处理（当前行为）")
 print("=" * 76)
 
 cases = [
@@ -34,7 +34,7 @@ cases = [
 ]
 
 for dest, expected in cases:
-    got = _is_beijing(dest)
+    got = _is_supported_destination(dest)
     if expected == "?":
         mark = "⚠️ 应为 True（占位词=没填）" if not got else "✓"
         print(f"  {dest!r:14} → {got}   {mark}")

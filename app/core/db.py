@@ -14,6 +14,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS attractions (
     id          INTEGER PRIMARY KEY,
     name        TEXT NOT NULL,
+    city        TEXT NOT NULL DEFAULT '北京',   -- ★ 城市（多城时区分同名区）
     level       TEXT,              -- 5A/4A/3A...
     district    TEXT,
     address     TEXT,
@@ -125,6 +126,37 @@ def _migrate(conn):
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {decl}")
 
     _migrate_events_notnull(conn)
+    _migrate_attractions_city(conn)
+
+
+def _migrate_attractions_city(conn):
+    """给 attractions 补 city 列（多城市支持的基础）
+
+    老库只有 district（16 个北京区），没有城市维度。
+    加 city 列后，同名区（如两个城市都有「朝阳区」）才能区分。
+
+    回填策略：
+      - 已有数据一律标为 DEFAULT_CITY（当前只有北京）
+      - 若 city 列已存在但不为空值，不动
+    """
+    from app.services.cities import DEFAULT_CITY
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(attractions)")}
+    if not cols:
+        return                      # 表不存在
+
+    if "city" not in cols:
+        conn.execute(
+            f"ALTER TABLE attractions ADD COLUMN city TEXT NOT NULL DEFAULT '{DEFAULT_CITY}'")
+        return
+
+    # 列已存在但有空值 → 回填
+    blank = conn.execute(
+        "SELECT COUNT(*) FROM attractions WHERE city IS NULL OR city = ''").fetchone()[0]
+    if blank:
+        conn.execute(
+            "UPDATE attractions SET city=? WHERE city IS NULL OR city = ''",
+            (DEFAULT_CITY,))
 
 
 def _migrate_events_notnull(conn):
