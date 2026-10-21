@@ -61,7 +61,20 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     nickname      TEXT,
     created_at    TEXT NOT NULL,
-    last_login    TEXT
+    last_login    TEXT,
+    role          TEXT NOT NULL DEFAULT 'person',   -- person | agency
+    org_id        TEXT                              -- 文旅局账号关联 teams.id
+);
+
+-- 文旅局（团队）：一个文旅局账号归属一个团队，团队下可有成员
+CREATE TABLE IF NOT EXISTS teams (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,        -- 如「成都市文化广电旅游局」
+    region      TEXT,                 -- 如「成都」
+    owner_id    TEXT NOT NULL,        -- 创建者
+    space_key   TEXT,                 -- 对应 Coze space（暂空）
+    intro       TEXT,
+    created_at  TEXT NOT NULL
 );
 
 -- 会话（只有登录用户的会落库；匿名会话在内存）
@@ -86,8 +99,89 @@ CREATE TABLE IF NOT EXISTS events (
     created_at  TEXT NOT NULL
 );
 
+
+-- 文旅局在自己团队下创建的智能体
+CREATE TABLE IF NOT EXISTS agents (
+    id          TEXT PRIMARY KEY,
+    team_id     TEXT NOT NULL,            -- 归属的文旅局（teams.id）
+    creator_id  TEXT NOT NULL,            -- 创建者（用户 id）
+    name        TEXT NOT NULL,
+    region      TEXT,                     -- 覆盖地区，用于主智能体路由
+    description TEXT,
+    prompt      TEXT,                     -- 人设 / 话术
+    status      TEXT NOT NULL DEFAULT 'draft',   -- draft | published
+    external_id TEXT,                     -- 对应 Coze bot_id（暂空）
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    deleted_at  TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_attr_name ON attractions(name);
 CREATE INDEX IF NOT EXISTS idx_crowd_name ON crowd_index(name);
+
+-- ── 内容社区 ──────────────────────────────────────────────
+-- 帖子：普通图文（content）或 AI 行程分享（inspiration）
+CREATE TABLE IF NOT EXISTS posts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT NOT NULL,
+    type        TEXT NOT NULL DEFAULT 'content',   -- content | inspiration
+    title       TEXT NOT NULL,
+    body        TEXT,
+    cover_url   TEXT,
+    images      TEXT,                              -- JSON 数组
+    itinerary   TEXT,                              -- JSON，灵感帖的结构化行程
+    motivation  TEXT,                              -- 动机标签（如「恢复/逃离」）
+    stops_count INTEGER DEFAULT 0,
+    hours       INTEGER DEFAULT 0,
+    likes       INTEGER DEFAULT 0,
+    views       INTEGER DEFAULT 0,
+    is_public   INTEGER DEFAULT 1,
+    created_at  TEXT NOT NULL,
+    deleted_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS likes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id    INTEGER NOT NULL,
+    user_id    TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(post_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS comments (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id    INTEGER NOT NULL,
+    user_id    TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+
+-- 站内消息
+CREATE TABLE IF NOT EXISTS messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    TEXT NOT NULL,
+    type       TEXT NOT NULL,       -- like | comment | ai | system
+    ref_id     INTEGER,
+    content    TEXT NOT NULL,
+    is_read    INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+-- 搜索日志与命中（热榜靠这个算）
+CREATE TABLE IF NOT EXISTS search_logs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    TEXT,
+    keyword    TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS post_search_hits (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id    INTEGER NOT NULL,
+    keyword    TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 # 索引依赖 sessions.user_id，必须等 _migrate 补列之后再建
@@ -97,6 +191,13 @@ CREATE INDEX IF NOT EXISTS idx_events_user ON events(user_id);
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_time ON events(created_at);
+CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id);
+CREATE INDEX IF NOT EXISTS idx_posts_type ON posts(type, created_at);
+CREATE INDEX IF NOT EXISTS idx_likes_post ON likes(post_id);
+CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id);
+CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, is_read);
+CREATE INDEX IF NOT EXISTS idx_search_hits_post ON post_search_hits(post_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_agents_team ON agents(team_id, status);
 """
 
 
@@ -116,13 +217,23 @@ def _migrate(conn):
     def cols(table):
         return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
 
-    s = cols("sessions")
+    for name, decl in (
+        ("avatar_url", "TEXT"),
+        ("city", "TEXT"),
+        ("bio", "TEXT"),
+        ("role", "TEXT DEFAULT 'person'"),
+        ("org_id", "TEXT"),
+    ):
+        # ⚠️ 实时检查，不用快照 —— 同一批里若重复也不会炸
+        if name not in cols("users"):
+            conn.execute(f"ALTER TABLE users ADD COLUMN {name} {decl}")
+
     for name, decl in (
         ("user_id", "TEXT"),
         ("ended_at", "TEXT"),
         ("turn_count", "INTEGER DEFAULT 0"),
     ):
-        if name not in s:
+        if name not in cols("sessions"):
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {decl}")
 
     _migrate_events_notnull(conn)

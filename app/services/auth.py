@@ -82,12 +82,23 @@ class AuthError(Exception):
     pass
 
 
-def register(email: str, password: str, nickname: str = "") -> dict:
+def register(email: str, password: str, nickname: str = "",
+             role: str = "person", org_name: str = "", region: str = "") -> dict:
+    """注册
+
+    role:
+      person → 个人用户
+      agency → 文旅局账号，会同时创建一个 team，org_name 作为团队名
+    """
     email = (email or "").strip().lower()
     if not EMAIL_RE.match(email):
         raise AuthError("邮箱格式不正确")
     if len(password or "") < 6:
         raise AuthError("密码至少 6 位")
+    if role not in ("person", "agency"):
+        raise AuthError("身份只能是个人或文旅局")
+    if role == "agency" and not (org_name or "").strip():
+        raise AuthError("文旅局账号必须填写机构名称")
 
     with connect() as conn:
         exists = conn.execute(
@@ -97,19 +108,32 @@ def register(email: str, password: str, nickname: str = "") -> dict:
 
         uid = uuid.uuid4().hex[:16]
         now = datetime.now().isoformat()
+        name = nickname or (org_name.strip() if role == "agency" else email.split("@")[0])
+
+        org_id = None
+        if role == "agency":
+            org_id = uuid.uuid4().hex[:16]
+            conn.execute(
+                "INSERT INTO teams (id,name,region,owner_id,created_at) "
+                "VALUES (?,?,?,?,?)",
+                (org_id, org_name.strip(), region.strip() or None, uid, now))
+
         conn.execute(
-            "INSERT INTO users (id,email,password_hash,nickname,created_at,last_login) "
-            "VALUES (?,?,?,?,?,?)",
-            (uid, email, hash_password(password), nickname or email.split("@")[0],
-             now, now))
-    return {"id": uid, "email": email, "nickname": nickname or email.split("@")[0]}
+            "INSERT INTO users "
+            "(id,email,password_hash,nickname,created_at,last_login,role,org_id) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (uid, email, hash_password(password), name, now, now, role, org_id))
+
+    return {"id": uid, "email": email, "nickname": name,
+            "role": role, "org_id": org_id,
+            "org_name": org_name.strip() if role == "agency" else None}
 
 
 def login(email: str, password: str) -> dict:
     email = (email or "").strip().lower()
     with connect() as conn:
         row = conn.execute(
-            "SELECT id,email,password_hash,nickname FROM users WHERE email=?",
+            "SELECT id,email,password_hash,nickname,role,org_id FROM users WHERE email=?",
             (email,)).fetchone()
     if not row or not verify_password(password, row["password_hash"]):
         raise AuthError("邮箱或密码不正确")
@@ -117,17 +141,38 @@ def login(email: str, password: str) -> dict:
     with connect() as conn:
         conn.execute("UPDATE users SET last_login=? WHERE id=?",
                      (datetime.now().isoformat(), row["id"]))
-    return {"id": row["id"], "email": row["email"], "nickname": row["nickname"]}
+        org_name = None
+        if row["org_id"]:
+            t = conn.execute("SELECT name FROM teams WHERE id=?",
+                             (row["org_id"],)).fetchone()
+            org_name = t["name"] if t else None
+
+    return {"id": row["id"], "email": row["email"], "nickname": row["nickname"],
+            "role": row["role"] or "person", "org_id": row["org_id"],
+            "org_name": org_name}
 
 
 def get_user(user_id: str) -> Optional[dict]:
+    """当前用户。⚠️ 必须带 role/org_id —— 前端与权限判断都依赖它"""
     if not user_id:
         return None
     with connect() as conn:
         row = conn.execute(
-            "SELECT id,email,nickname,created_at,last_login FROM users WHERE id=?",
+            "SELECT id,email,nickname,created_at,last_login,role,org_id "
+            "FROM users WHERE id=?",
             (user_id,)).fetchone()
-    return dict(row) if row else None
+        if not row:
+            return None
+        out = dict(row)
+        out["role"] = out.get("role") or "person"
+        if out.get("org_id"):
+            t = conn.execute("SELECT name,region FROM teams WHERE id=?",
+                             (out["org_id"],)).fetchone()
+            out["org_name"] = t["name"] if t else None
+            out["org_region"] = t["region"] if t else None
+        else:
+            out["org_name"] = None
+        return out
 
 
 def delete_user(user_id: str, password: str) -> None:

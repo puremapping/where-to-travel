@@ -206,13 +206,9 @@ function showLoginHint() {
   box.innerHTML = `
     <div class="bubble hint-bubble">
       这一版行程只在当前页面，<b>刷新就没了</b>。
-      <a href="#" class="hint-login">登录</a>后可以保存到账号，以后能翻回来。
+      <a href="/login?next=%2Fchat" class="hint-login">登录</a>后可以保存到账号，以后能翻回来。
     </div>`;
   $('#messages').appendChild(box);
-  box.querySelector('.hint-login').onclick = (e) => {
-    e.preventDefault();
-    openAuth('login');
-  };
   scrollToBottom();
 }
 
@@ -393,8 +389,6 @@ function greet() {
 
 // ────────── 用户系统 ──────────
 
-let authMode = 'login';
-
 async function refreshUser() {
   try {
     const d = await getJSON('/api/auth/me');
@@ -409,7 +403,12 @@ function renderUserBox() {
   const box = $('#user-box');
   if (!box) return;
   if (currentUser) {
-    box.innerHTML = `<span class="user-name">${esc(currentUser.nickname || currentUser.email)}</span>
+    const tag = currentUser.role === 'agency'
+      ? `<span class="role-badge">文旅局</span>` : '';
+    const org = currentUser.org_name
+      ? `<span class="org-name">${esc(currentUser.org_name)}</span>` : '';
+    box.innerHTML = `${tag}${org}<span class="user-name">${esc(currentUser.nickname || currentUser.email)}</span>
+      ${currentUser.role === 'agency' ? '<a href="/console">开发台</a>' : ''}
       <a href="#" id="btn-logout">退出</a>`;
     $('#btn-logout').onclick = async (e) => {
       e.preventDefault();
@@ -420,8 +419,8 @@ function renderUserBox() {
     };
     show($('#btn-history'));
   } else {
-    box.innerHTML = `<a href="#" id="btn-login">登录</a>`;
-    $('#btn-login').onclick = (e) => { e.preventDefault(); openAuth('login'); };
+    // ⚠️ 登录入口不放在本页 —— 跳独立登录页，登录后回到对话
+    box.innerHTML = `<a href="/login?next=%2Fchat" id="btn-login">登录</a>`;
     hide($('#btn-history'));
   }
 }
@@ -432,50 +431,10 @@ function esc(s) {
   return d.innerHTML;
 }
 
-function openAuth(mode) {
-  authMode = mode || 'login';
-  const isLogin = authMode === 'login';
-  $('#auth-title').textContent = isLogin ? '登录' : '注册';
-  $('#auth-submit').textContent = isLogin ? '登录' : '注册';
-  $('#auth-hint').textContent = isLogin
-    ? '登录后行程会保存到你的账号。'
-    : '注册后行程会保存到你的账号。';
-  isLogin ? hide($('#auth-nickname')) : show($('#auth-nickname'));
-  $('#auth-toggle').textContent = isLogin ? '还没有账号？注册' : '已有账号？登录';
-  $('#auth-error').textContent = '';
-  show($('#auth-modal'));
-  $('#auth-email').focus();
-}
-
-function closeAuth() { hide($('#auth-modal')); }
-
-async function submitAuth() {
-  const email = $('#auth-email').value.trim();
-  const password = $('#auth-password').value;
-  const nickname = $('#auth-nickname').value.trim();
-  const err = $('#auth-error');
-  if (!email || !password) { err.textContent = '邮箱和密码都要填'; return; }
-
-  const btn = $('#auth-submit');
-  btn.disabled = true;
-  err.textContent = '';
-  try {
-    const d = await postJSON(
-      authMode === 'login' ? '/api/auth/login' : '/api/auth/register',
-      { email, password, nickname });
-    currentUser = d.user;
-    closeAuth();
-    renderUserBox();
-    $('#auth-password').value = '';
-    // 登录后，之前匿名聊的会话归到账号下（服务端已按 cookie 绑定）
-    addMessage('assistant', authMode === 'login'
-      ? '登录成功。之后的对话会保存，可以在「我的行程」里翻到。'
-      : '注册成功。之后的对话会保存，可以在「我的行程」里翻到。');
-  } catch (e) {
-    err.textContent = e.message;
-  } finally {
-    btn.disabled = false;
-  }
+// 登录/注册统一走独立页 /login（本页不再内嵌弹窗）。
+// 需要用户主动登录的场景（分享、看历史）一律跳转，并带 next 回跳地址。
+function gotoLogin(nextPath) {
+  location.href = '/login?next=' + encodeURIComponent(nextPath || '/chat');
 }
 
 async function openHistory() {
@@ -568,21 +527,6 @@ document.querySelectorAll('button.st').forEach(btn => {
   btn.onclick = () => send(btn.textContent);
 });
 
-// 认证 UI
-$('#auth-close').onclick = closeAuth;
-$('#auth-toggle').onclick = (e) => {
-  e.preventDefault();
-  openAuth(authMode === 'login' ? 'register' : 'login');
-};
-$('#auth-submit').onclick = submitAuth;
-$('#auth-modal').onclick = (e) => { if (e.target.id === 'auth-modal') closeAuth(); };
-['auth-email', 'auth-password', 'auth-nickname'].forEach((id) => {
-  const el = document.getElementById(id);
-  if (el) el.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') submitAuth();
-  });
-});
-
 // 历史抽屉
 $('#btn-history').onclick = openHistory;
 $('#history-close').onclick = () => hide($('#history-drawer'));
@@ -593,3 +537,107 @@ loadStats();
 greet();
 refreshUser();
 $('#input').focus();
+
+// ────────── 分享行程 ──────────
+
+(function initShare() {
+  const btn = document.getElementById('btn-share');
+  const modal = document.getElementById('share-modal');
+  if (!btn || !modal) return;
+
+  btn.onclick = () => {
+    if (!lastItinerary) { alert('先生成一条行程再分享'); return; }
+    if (!currentUser) {
+      // ⚠️ 匿名会话刷新即丢 —— 先把行程暂存到浏览器，登录回来再接上
+      try {
+        sessionStorage.setItem('pending_share',
+          JSON.stringify({ itinerary: lastItinerary, at: Date.now() }));
+      } catch (e) { /* 存不下就算了 */ }
+      gotoLogin('/chat');
+      return;
+    }
+    openShareForm(lastItinerary);
+  };
+
+  function openShareForm(itin) {
+    const mot = (itin.motivation || '').trim();
+    document.getElementById('share-title').value =
+      mot ? `${mot} · 一日行程` : '我的一日行程';
+    document.getElementById('share-body').value = '';
+    document.getElementById('share-error').textContent = '';
+    modal.classList.remove('hidden');
+  }
+  window.__openShareForm = openShareForm;
+
+  // 登录后若有待分享的行程，自动弹出
+  (function resumePendingShare() {
+    let raw = null;
+    try { raw = sessionStorage.getItem('pending_share'); } catch (e) {}
+    if (!raw) return;
+    try {
+      const p = JSON.parse(raw);
+      // 30 分钟内有效
+      if (!p.itinerary || Date.now() - (p.at || 0) > 30 * 60 * 1000) {
+        sessionStorage.removeItem('pending_share');
+        return;
+      }
+      sessionStorage.removeItem('pending_share');
+      lastItinerary = p.itinerary;
+      const wait = setInterval(() => {
+        if (currentUser) {
+          clearInterval(wait);
+          openShareForm(p.itinerary);
+          addMessage('assistant', '欢迎回来。接着把刚才那条行程分享出去吧。');
+        }
+      }, 400);
+      setTimeout(() => clearInterval(wait), 15000);
+    } catch (e) { sessionStorage.removeItem('pending_share'); }
+  })();
+
+  document.getElementById('share-close').onclick =
+    () => modal.classList.add('hidden');
+  modal.onclick = (e) => {
+    if (e.target === modal) modal.classList.add('hidden');
+  };
+
+  document.getElementById('share-submit').onclick = async () => {
+    const title = document.getElementById('share-title').value.trim();
+    const body = document.getElementById('share-body').value.trim();
+    const err = document.getElementById('share-error');
+    if (!title) { err.textContent = '给行程起个名字吧'; return; }
+
+    const btnS = document.getElementById('share-submit');
+    btnS.disabled = true;
+    try {
+      await postJSON('/api/posts', {
+        title,
+        body,
+        type: 'inspiration',
+        itinerary: lastItinerary,
+        motivation: lastItinerary.motivation || null,
+        cover_url: null,
+      });
+      modal.classList.add('hidden');
+      addMessage('assistant',
+        `已发布到「旅游灵感」：**${title}**。去首页能看到它。`);
+    } catch (e) {
+      err.textContent = e.message;
+    } finally {
+      btnS.disabled = false;
+    }
+  };
+})();
+
+// ────────── 从浏览页带词进来 ──────────
+// /chat?q=成都  → 填进输入框，不自动发送（让用户补全意图）
+(function fillQuery() {
+  const q = new URLSearchParams(location.search).get('q');
+  if (!q) return;
+  const input = document.getElementById('input');
+  if (input) {
+    input.value = q;
+    input.focus();
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+  }
+})();

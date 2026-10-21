@@ -1,10 +1,10 @@
 # .pms.yml — 项目元信息
 name: where_to_travel
-version: 0.5.0
+version: 0.7.0
 status: doing
 tags: [education/course, travel, llm, recommendation, fastapi, beijing-opendata, amap, function-calling, auth, analytics]
 created: 2026-09-17
-last_used: 2026-10-15
+last_used: 2026-10-21
 sp_project: null
 temporary_owner: null
 archive_path: null
@@ -30,7 +30,26 @@ context:
   decided: |
     - 【目标】阿哲定为「想尽可能落地试试」，是他第一个与商业化有关的项目
     - 【架构】FastAPI + SQLite + Jinja2 + Leaflet，不做前后端分离（无构建链）
-    - 【v0.5】对话质量修复 + 文档（本次）：
+    - 【v0.7】三页式产品 + 身份系统（本次）：
+      · 三块：①浏览页 /（瀑布流+三页签：内容/旅游灵感/今日热榜）
+              ②AI 对话页 /chat（保留原实现，加「分享行程」）
+              ③个人主页 /me（回忆/发布/消息/设置）
+      · ⚠️ 保留 /chat 不迁移；/ 换成浏览页（破坏性改动，README 待更新）
+      · 独立登录页 /login：不再内嵌弹窗到 chat（阿哲原话「不要把登录入口放在chat」），
+        chat/browse 的登录入口全是跳转 + next 回跳
+      · 身份 person|agency 注册二选一，**不锁定可升级**（/api/auth/upgrade-agency）
+      · agency 注册自动建 teams 行；智能体归属 team 不归属个人
+      · /console 开发页：只有 agency 可进（未登录→渲染登录页预选 agency；
+        个人→console_denied 提示升级）
+      · ⚠️ 发布校验落在服务端：缺 prompt/region 拒绝发布 ——
+        region 是主智能体路由的唯一依据，空着发布=路由黑洞
+      · 热榜=搜索命中次数（非浏览/点赞，阿哲定）：search_logs + post_search_hits
+      · 图片先本地存储（未做上传接口，卡片用占位）；评论要；回忆总结用 LLM；
+        浏览页对未登录开放
+      · agents.external_id 留空位，将来接 Coze bot 只填这个字段
+      · 分享暂存 sessionStorage(pending_share,30min) —— 匿名会话刷新即丢，
+        登录回来自动重弹分享框
+    - 【v0.5】对话质量修复 + 文档：
       · ⚠️ **兜底不能套模板** —— 模板不读用户输入，必然答非所问
       · 实测：模型打算调工具时 content 为空；服务端把 tool_call 拦掉后，
         reply 与 tool_calls **双空** → 用户收到空洞兜底
@@ -87,6 +106,11 @@ context:
     - ⚠️ **LLM 输出要清洗占位词** —— 模型会把「未知/无/不确定」当字面值填进字段，
       污染下游逻辑（曾导致「未知还查不了」）。入口归一成空，且两层都清洗
     - ⚠️ 约束要落在 schema 上，别只靠代码约定（`events.user_id NOT NULL`）
+    - ⚠️ 迁移里别用 cols() 快照判重 —— 同批列表里有重复项时会炸
+      （踩过：org_id 写重了一次，duplicate column name）
+    - ⚠️ 拆 UI 要拆干净：新登录页上线后，chat 里的旧弹窗/函数/绑定必须全删，
+      否则两套并存，等于没满足「不要放在 chat」的要求
+    - ⚠️ 带匿名会话跳页 = 丢对话 —— 必须先把要保的东西暂存（sessionStorage）再跳
   deps:
     - Python 3.13（uv 建的独立 .venv）
     - GLM API（智谱 glm-4-flash）
@@ -96,6 +120,7 @@ context:
   reference:
     - DESIGN.md — 设计文档（架构、流程、已知问题）
     - docs/DESIGN-user-system.md — 用户系统与行为分析设计（v0.4）
+    - docs/DESIGN-three-pages.md — 三页式产品设计（浏览/对话/个人）+ 身份系统
     - docs/DESIGN-conversation-itinerary-loop.md — 对话-行程闭环设计（v0.3）
     - docs/reference/PRD.md — 产品需求文档 V1.2
     - docs/reference/analysis.md — 竞品与学术支撑

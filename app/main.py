@@ -67,8 +67,53 @@ def require_user(user=Depends(current_user_optional)):
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    # Starlette 新版签名：TemplateResponse(request, name, context)
-    return templates.TemplateResponse(request, "index.html")
+    """浏览页（内容社区）—— 匿名可访问"""
+    return templates.TemplateResponse(request, "browse.html")
+
+
+@app.get("/chat", response_class=HTMLResponse)
+def chat_page(request: Request, q: str = None):
+    """AI 对话页
+
+    ⚠️ `q` 从浏览页搜索框的 AI 按钮带过来，前端填进输入框（不自动发送）
+    """
+    return templates.TemplateResponse(request, "chat.html", {"q": q or ""})
+
+
+@app.get("/me", response_class=HTMLResponse)
+def me_page(request: Request):
+    """个人主页"""
+    return templates.TemplateResponse(request, "me.html")
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    """独立的登录 / 注册页
+
+    role 可选：person | agency，用来预选身份（如从「我是文旅局」入口进来）
+    next：登录成功后的跳转目标
+    """
+    return templates.TemplateResponse(request, "login.html", {
+        "role": "agency" if request.query_params.get("role") == "agency" else "person",
+        "next": request.query_params.get("next") or "/",
+    })
+
+
+@app.get("/console", response_class=HTMLResponse)
+def console_page(request: Request, user=Depends(current_user_optional)):
+    """文旅局的智能体开发页
+
+    ⚠️ 只有 agency 身份可访问。个人用户进来会看到提示。
+    """
+    if not user:
+        return templates.TemplateResponse(request, "login.html", {
+            "role": "agency",
+            "next": "/console",
+        }, status_code=200)
+    if user.get("role") != "agency":
+        return templates.TemplateResponse(request, "console_denied.html",
+                                          {"user": user}, status_code=200)
+    return templates.TemplateResponse(request, "console.html", {"user": user})
 
 
 # ---------------- 认证 ----------------
@@ -77,12 +122,17 @@ def index(request: Request):
 async def register(request: Request, response: Response):
     body = await request.json()
     try:
-        user = auth_svc.register(body.get("email", ""), body.get("password", ""),
-                                 body.get("nickname", ""))
+        user = auth_svc.register(
+            body.get("email", ""), body.get("password", ""),
+            body.get("nickname", ""),
+            role=body.get("role", "person"),
+            org_name=body.get("org_name", ""),
+            region=body.get("region", ""))
     except auth_svc.AuthError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
-    ana.track(ana.EV_USER_REGISTER, user_id=user["id"], email=user["email"])
+    ana.track(ana.EV_USER_REGISTER, user_id=user["id"], email=user["email"],
+              role=user["role"])
     _set_auth_cookie(response, user["id"])
     return {"user": user}
 
@@ -522,3 +572,278 @@ def analytics_report(days: int = 30, token: str = None):
 def admin_page(request: Request):
     # Starlette 新版签名：TemplateResponse(request, name, context)
     return templates.TemplateResponse(request, "admin.html")
+
+# ---------------- 内容社区 ----------------
+# ⚠️ 浏览开放（匿名可看），互动需登录
+
+from app.services import posts as post_svc
+
+
+@app.get("/api/posts")
+def api_list_posts(tab: str = "content", page: int = 1, size: int = 20,
+                   keyword: str = None,
+                   user=Depends(current_user_optional)):
+    """帖子列表
+
+    tab: content（全部）| inspiration（行程灵感）| hot（今日热榜）
+    keyword: 搜索词，命中会记入热榜统计
+    """
+    uid = user["id"] if user else None
+    result = post_svc.list_posts(tab=tab, page=page, size=size,
+                                 keyword=keyword, viewer_id=uid)
+    # 搜索时记录（供热榜）
+    if keyword:
+        ids = [it["id"] for it in result["items"]]
+        post_svc.log_search(keyword, uid, ids)
+    return result
+
+
+@app.get("/api/posts/{post_id}")
+def api_get_post(post_id: int, user=Depends(current_user_optional)):
+    uid = user["id"] if user else None
+    d = post_svc.get_post(post_id, uid)
+    if not d:
+        return JSONResponse({"error": "帖子不存在"}, status_code=404)
+    return d
+
+
+@app.post("/api/posts")
+async def api_create_post(request: Request, user=Depends(require_user)):
+    """发帖（需登录）
+
+    body: {title, body?, type?, cover_url?, images?, itinerary?, motivation?}
+    ⚠️ type=inspiration 时必须带 itinerary
+    """
+    body = await request.json()
+    title = (body.get("title") or "").strip()
+    if not title:
+        return JSONResponse({"error": "标题不能为空"}, status_code=400)
+
+    ptype = body.get("type") or "content"
+    if ptype not in ("content", "inspiration"):
+        return JSONResponse({"error": "type 只能是 content 或 inspiration"},
+                            status_code=400)
+    if ptype == "inspiration" and not body.get("itinerary"):
+        return JSONResponse({"error": "行程灵感必须附带 itinerary"}, status_code=400)
+
+    pid = post_svc.create_post(
+        user["id"], title, body.get("body") or "", ptype,
+        cover_url=body.get("cover_url"),
+        images=body.get("images"),
+        itinerary=body.get("itinerary"),
+        motivation=body.get("motivation"))
+
+    ana.track(ana.EV_MESSAGE_SENT, user_id=user["id"], action="create_post",
+              post_type=ptype)
+    return {"id": pid, "ok": True}
+
+
+@app.delete("/api/posts/{post_id}")
+def api_delete_post(post_id: int, user=Depends(require_user)):
+    """删帖 —— 归属校验在服务层（AND user_id=?）"""
+    if not post_svc.delete_post(post_id, user["id"]):
+        return JSONResponse({"error": "帖子不存在或无权限"}, status_code=404)
+    return {"ok": True}
+
+
+@app.post("/api/posts/{post_id}/like")
+def api_toggle_like(post_id: int, user=Depends(require_user)):
+    return post_svc.toggle_like(post_id, user["id"])
+
+
+@app.get("/api/posts/{post_id}/comments")
+def api_list_comments(post_id: int):
+    return {"items": post_svc.list_comments(post_id)}
+
+
+@app.post("/api/posts/{post_id}/comments")
+async def api_add_comment(post_id: int, request: Request,
+                          user=Depends(require_user)):
+    body = await request.json()
+    content = (body.get("content") or "").strip()
+    if not content:
+        return JSONResponse({"error": "评论不能为空"}, status_code=400)
+    return post_svc.add_comment(post_id, user["id"], content)
+
+
+@app.get("/api/search/hot_keywords")
+def api_hot_keywords(limit: int = 10):
+    """热门搜索词（搜索框下方推荐用）"""
+    return {"items": post_svc.hot_keywords(limit)}
+
+
+# ---------------- 消息 ----------------
+
+@app.get("/api/messages")
+def api_messages(user=Depends(require_user)):
+    return post_svc.list_messages(user["id"])
+
+
+@app.post("/api/messages/read")
+async def api_messages_read(request: Request, user=Depends(require_user)):
+    body = await request.json()
+    return {"updated": post_svc.mark_read(user["id"], body.get("id"))}
+
+
+# ---------------- 个人主页 ----------------
+
+@app.get("/api/me/profile")
+def api_me_profile(user=Depends(require_user)):
+    with connect() as conn:
+        r = conn.execute("SELECT id,email,nickname,avatar_url,city,bio,created_at "
+                         "FROM users WHERE id=?", (user["id"],)).fetchone()
+    return dict(r) if r else {}
+
+
+@app.post("/api/me/profile")
+async def api_update_profile(request: Request, user=Depends(require_user)):
+    body = await request.json()
+    fields, args = [], []
+    for k in ("nickname", "avatar_url", "city", "bio"):
+        if k in body:
+            fields.append(f"{k}=?")
+            args.append(body[k])
+    if not fields:
+        return {"ok": True, "updated": 0}
+    args.append(user["id"])
+    with connect() as conn:
+        conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", args)
+    return {"ok": True}
+
+
+@app.get("/api/me/memories")
+def api_me_memories(user=Depends(require_user)):
+    """我的旅游回忆 —— 有行程的会话"""
+    with connect() as conn:
+        rows = conn.execute("""
+            SELECT id, created_at, turn_count,
+                   json_extract(profile,'$.primary') AS motivation,
+                   itinerary
+            FROM sessions
+            WHERE user_id=? AND itinerary IS NOT NULL
+              AND itinerary != '' AND itinerary != '{}'
+            ORDER BY created_at DESC LIMIT 50
+        """, (user["id"],)).fetchall()
+
+    items = []
+    for r in rows:
+        try:
+            it = json.loads(r["itinerary"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        items.append({
+            "session_id": r["id"],
+            "created_at": r["created_at"],
+            "motivation": r["motivation"],
+            "stops_count": len(it.get("stops", [])),
+            "hours": it.get("hours"),
+            "narrative": (it.get("narrative") or "")[:120],
+        })
+    return {"items": items, "total": len(items)}
+
+# ---------------- 文旅局：智能体开发 ----------------
+
+from app.services import agents as agent_svc
+
+
+def _require_agency(user):
+    """取当前用户的团队。非文旅局返回 (None, 错误响应)"""
+    if not user:
+        return None, JSONResponse({"error": "请先登录"}, status_code=401)
+    if user.get("role") != "agency":
+        return None, JSONResponse({"error": "仅文旅局账号可管理智能体"}, status_code=403)
+    if not user.get("org_id"):
+        return None, JSONResponse({"error": "账号未关联机构"}, status_code=400)
+    return user["org_id"], None
+
+
+@app.get("/api/agents")
+def api_list_agents(user=Depends(require_user)):
+    team_id, err = _require_agency(user)
+    if err:
+        return err
+    return {"items": agent_svc.list_agents(team_id)}
+
+
+@app.post("/api/agents")
+async def api_create_agent(request: Request, user=Depends(require_user)):
+    team_id, err = _require_agency(user)
+    if err:
+        return err
+    body = await request.json()
+    try:
+        aid = agent_svc.create_agent(
+            team_id, user["id"],
+            name=body.get("name", ""),
+            region=body.get("region", ""),
+            description=body.get("description", ""),
+            prompt=body.get("prompt", ""))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"id": aid, "ok": True}
+
+
+@app.get("/api/agents/{agent_id}")
+def api_get_agent(agent_id: str, user=Depends(require_user)):
+    team_id, err = _require_agency(user)
+    if err:
+        return err
+    a = agent_svc.get_agent(agent_id, team_id)
+    if not a:
+        return JSONResponse({"error": "不存在或无权限"}, status_code=404)
+    return a
+
+
+@app.post("/api/agents/{agent_id}")
+async def api_update_agent(agent_id: str, request: Request,
+                           user=Depends(require_user)):
+    team_id, err = _require_agency(user)
+    if err:
+        return err
+    body = await request.json()
+    ok = agent_svc.update_agent(agent_id, team_id, **{
+        k: body[k] for k in ("name", "region", "description", "prompt") if k in body})
+    return {"ok": ok}
+
+
+@app.post("/api/agents/{agent_id}/publish")
+def api_publish_agent(agent_id: str, user=Depends(require_user)):
+    team_id, err = _require_agency(user)
+    if err:
+        return err
+    r = agent_svc.publish_agent(agent_id, team_id)
+    if not r.get("ok"):
+        return JSONResponse({"error": r.get("error", "发布失败")}, status_code=400)
+    return r
+
+
+@app.delete("/api/agents/{agent_id}")
+def api_delete_agent(agent_id: str, user=Depends(require_user)):
+    team_id, err = _require_agency(user)
+    if err:
+        return err
+    if not agent_svc.delete_agent(agent_id, team_id):
+        return JSONResponse({"error": "不存在或无权限"}, status_code=404)
+    return {"ok": True}
+
+
+@app.post("/api/auth/upgrade-agency")
+async def upgrade_agency(request: Request, user=Depends(require_user)):
+    """个人身份升级为文旅局（不锁定，阿哲定的默认）"""
+    if user.get("role") == "agency":
+        return {"ok": True, "already": True}
+    body = await request.json()
+    org = (body.get("org_name") or "").strip()
+    if not org:
+        return JSONResponse({"error": "请填写机构名称"}, status_code=400)
+    import uuid as _uuid
+    from datetime import datetime as _dt
+    oid = _uuid.uuid4().hex[:16]
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO teams (id,name,region,owner_id,created_at) VALUES (?,?,?,?,?)",
+            (oid, org, (body.get("region") or "").strip() or None,
+             user["id"], _dt.now().isoformat()))
+        conn.execute("UPDATE users SET role='agency', org_id=? WHERE id=?",
+                     (oid, user["id"]))
+    return {"ok": True, "org_id": oid, "org_name": org}

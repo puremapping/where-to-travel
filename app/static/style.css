@@ -437,3 +437,33 @@ button.st {
   cursor: pointer; padding: 0 4px; line-height: 1;
 }
 .hi-del:hover { color: #b91c1c; }
+
+/* ─── 顶栏导航与身份徽标 ─── */
+
+.nav-link {
+  font-size: 13px; color: #4c8dff; text-decoration: none;
+  padding: 4px 10px; border: 1px solid #dce8ff; border-radius: 14px;
+}
+.nav-link:hover { background: #f5f9ff; }
+
+.role-badge {
+  font-size: 11px; padding: 2px 8px;
+  background: linear-gradient(135deg,#4c8dff,#7b5cff);
+  color: #fff; border-radius: 8px; margin-right: 6px;
+}
+.org-name { font-size: 12px; color: #777; margin-right: 6px; }
+
+.share-btn { margin-top: 14px; }
+.full { width: 100%; }
+
+/* 分享弹窗里的输入 */
+.modal-card input, .modal-card textarea {
+  width: 100%; box-sizing: border-box;
+  padding: 10px 12px; margin-bottom: 10px;
+  border: 1px solid #e0e3ea; border-radius: 8px;
+  font-size: 14px; outline: none; font-family: inherit;
+  background: #fafbfc;
+}
+.modal-card input:focus, .modal-card textarea:focus {
+  background: #fff; border-color: #4c8dff;
+}

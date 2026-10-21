@@ -33,3 +33,7 @@
 - 2026-10-15: **v0.5 对话质量修复** —— 修三个叠加缺陷：①兜底套模板（不读输入，答非所问）②模型把「未知」当目的地填进字段 ③工具被服务端拦掉后 reply/tool_calls 双空
 - 2026-10-15: `events.user_id` 改为 NOT NULL —— 把「匿名不落库」从代码约定升级为结构约束（SQLite 需重建表迁移，实测写 NULL 被拒）
 - 2026-10-15: 产出 `docs/INFORMATION-ARCHITECTURE.md` —— 三层信息架构（交互/语义/数据）+ 标签体系（动机七类 → 偏好标签 → 景区属性）
+- 2026-10-20: 低代码 Agent 平台调研 —— 许可证实测：Dify 明确禁止多租户（不可作平台底座）；Coze Studio 是唯一「Apache-2.0 + 完整 Agent 平台」组合
+- 2026-10-20: Coze Studio 私有化部署跑通 + 多租户二开 —— 12 容器 13GB；修 5 个部署坑（MinIO 撤镜像 / mc 路径 / **容器继承宿主代理导致 etcd 起不来** / 管理员靠环境变量 / go build 静默失败）；二开 ~120 行 Go 解除 TeamSpaceNum 硬编码与 spacePo2Do 写死；实测建 3 个文旅局空间、发布 connector 1024、`/v3/chat` 调通。详见 `docs/research/coze-studio-hands-on.md` + `coze-studio-multitenant.patch`
+- 2026-10-20: **v0.6 城市抽象** —— 去「北京」硬编码（`cities.py` 从库里算城市/区名），prompt 用 `{supported}` 占位；`attractions` 加 `city` 列。插入时踩到时序 bug：数据边界拦截读的是上一轮画像，本轮说「上海」会漏拦
+- 2026-10-21: **v0.7 三页式 + 身份系统** —— ①浏览页 /（瀑布流+内容/旅游灵感/热榜三页签）②AI 对话 /chat（加「分享行程」）③个人主页 /me；独立登录页 /login（**拆掉 chat 内嵌弹窗**）；身份 person|agency 可升级；`/console` 文旅局开发页（发布强制校验 prompt+region）；热榜按搜索命中；`posts`/`likes`/`comments`/`messages`/`teams`/`agents` 六张表。5 个测试套件全过
